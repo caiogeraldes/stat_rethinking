@@ -1,0 +1,586 @@
+---
+title: "Homework - Week 4"
+author: "Caio Geraldes"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+---
+
+```{r echo=FALSE, include=FALSE}
+library(tidyverse)
+library(rethinking)
+library(dagitty)
+```
+
+# Exercice 1
+
+## Question
+
+Revisit the marriage, age, and happiness collider bias example from Chapter 6. Run models m6.9 and m6.10 again (pages 178–179). Compare these two models using both PSIS and WAIC. Which model is expected to make better predictions, according to these criteria? On the basis of the causal model, how should you interpret the parameter estimates from the model
+preferred by PSIS and WAIC?
+
+## Answer
+
+### Loading data
+
+```{r}
+d <- sim_happiness(seed=1997, N_years=1000)
+
+d2 <- d[ d$age>17 , ] # only adults
+d2$A <- ( d2$age - 18 ) / ( 65 - 18 )
+d2$mid <- d2$married + 1
+
+d2
+```
+
+### Modeling
+
+#### Model `m6.9`:
+
+
+$happiness \sim \text{Normal}(\mu, \sigma)\\\mu = \alpha_{mid} + \beta_A * A\\\alpha_{mid} \sim \text{Normal}(0,1)\\\beta_A \sim \text{Normal}(0,2)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m6.9 <- ulam(
+          alist(
+              happiness ~ dnorm(mu, sigma),
+              mu <- a[mid] + bA*A,
+              a[mid] ~ dnorm(0,1),
+              bA ~ dnorm(0,2),
+              sigma ~ dexp(1)
+              ),
+          data=d2,
+          chains=4,
+          cores=4,
+          log_lik=TRUE
+        )
+```
+
+
+#### Model `m6.10`
+
+
+$happiness \sim \text{Normal}(\mu, \sigma)\\\mu = \alpha + \beta_A * A\\\alpha \sim \text{Normal}(0,1)\\\beta_A \sim \text{Normal}(0,2)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m6.10 <- ulam(
+          alist(
+              happiness ~ dnorm(mu, sigma),
+              mu <- a + bA*A,
+              a ~ dnorm(0,1),
+              bA ~ dnorm(0,2),
+              sigma ~ dexp(1)
+              ),
+          data=d2,
+          chains=4,
+          cores=4,
+          log_lik=TRUE
+        )
+```
+
+### Comparing the models
+
+```{r}
+precis(m6.9, depth = 2)
+precis_plot(precis(m6.9, depth = 2))
+```
+
+```{r}
+precis(m6.10)
+precis_plot(precis(m6.10))
+```
+
+
+```{r echo=TRUE}
+waic.cmp6.9.10 <- compare(m6.9, m6.10, func = WAIC)
+row.names(waic.cmp6.9.10) <- c("H ~ α_mid + β_A*A", "H ~ α + β_A*A")
+waic.cmp6.9.10
+plot(waic.cmp6.9.10)
+```
+
+```{r echo=TRUE}
+psis.cmp6.9.10 <- compare(m6.9, m6.10, func = PSIS)
+row.names(psis.cmp6.9.10) <- c("H ~ α_mid + β_A*A", "H ~ α + β_A*A")
+psis.cmp6.9.10
+plot(psis.cmp6.9.10)
+```
+
+### Interpretation
+
+The WAIC and PSIS expect that the model `m6.9`, defined as $H \sim \alpha_{mid} + \beta_{A}*A$ will make better predictions than the model `m6.10`, defined as $H \sim \alpha + \beta_{A}*A$.
+
+The causal model for this example assumes that Age and Happiness both cause Marriage, making Marriage a colider.
+Age and Happiness are not causually associated, so we have a DAG:
+
+```{r, echo=FALSE}
+m6.dag <- dagitty( 'dag {
+A [pos="-2,-1"]
+M [pos="-1,-1"]
+H [pos="0,-1"]
+A -> M
+H -> M
+}')
+drawdag(m6.dag)
+```
+
+The prediction models `m6.9` and `m6.10` try to predict Happiness by Age, something causually impossible given the DAG above, i.e. the causal effect of Age on Happiness should be 0.
+And that is what the `m6.10` shows, so that it represents the causal model as it is defined:
+
+```{r}
+precis(m6.10)
+precis_plot(precis(m6.10))
+```
+
+The model `m6.9` stratifies the data by Marriage, which opens an association path between Age and Happiness.
+This is why the predictive models work better when the effects of Age over Happiness are adjusted by Marriage.
+
+```{r echo=FALSE}
+m6.9.dag <- dagitty( 'dag {
+A [exposure,pos="-2,-1"]
+M [adjusted,pos="-1,-1"]
+H [outcome,pos="0,-1"]
+A -> M
+H -> M
+H <-> A
+}')
+drawdag(m6.9.dag)
+drawopenpaths(m6.9.dag, Z="M", col_arrow = 2)
+```
+
+This model assumes a negative correlation between Age and Happiness (89% percentile interval of -0.99 to -0.62):
+
+```{r}
+precis(m6.9, depth = 2)
+precis_plot(precis(m6.9, depth = 2))
+```
+
+```{r, echo=FALSE}
+post.samples <- extract.samples(m6.9)
+pi89 <- PI(post.samples$bA)
+bAdens <- with(density(post.samples$bA, bw=0.02), tibble(x, y))
+bAdens %>% ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(bAdens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    ylab("Density") +
+    xlab("Posterior distribution of β_A")
+```
+
+The data in `d2` gives an equal probabillity for any combination of age and happiness, but the probabillity of being married depends on Age and Happiness, so the happier a person is there is more chance for they to marry at some point in their lifes, and the older the person is, they had more chances to marry.
+
+```{r echo=FALSE}
+ggplot(d2, aes(x=age, y=happiness, fill=as.factor(married))) +
+    geom_raster() +
+    scale_fill_brewer("Married", labels=c('No', 'Yes'))
+```
+By stratifying by the collider `Marriage`, association is created between Age and Happiness.
+People that stay unmarried for a longer time will be so because they have lower than avarage happiness according to the causal model (see in the left part of the plot bellow). Those who have a higher than avarage happiness will sooner migrate to the married population, causing a negetive association between Age and Happiness appear in the unmarried population.
+As for those who marry at some point, the age in which they marry will be higher the lower their happiness, i.e. unhappier people will take more time to marry, so that the same negative association is observed.
+
+
+```{r echo=FALSE}
+d2 %>% ggplot(aes(x=age, y=happiness)) +
+    geom_point(alpha=0.2, color='purple') +
+    geom_smooth(formula = y ~ x, method = "lm") +
+    facet_wrap(~ married, labeller = labeller(married=c("0"="Not married", "1"= "Married")))
+```
+
+
+This effect is represented by the values of $\alpha_{married}$ (a[2]) and $\alpha_{not married}$ (a[1]) in `m6.9`. Contrast them with the values of $\alpha$ in `m6.10`, in which marriage has been ignored from the modeling:
+
+```{r}
+a1 <- post.samples$a[,1]
+a2 <- post.samples$a[,2]
+a3 <- extract.samples(m6.10)$a
+
+a1dens <- with(density(a1, bw=0.01), tibble(x, y))
+a2dens <- with(density(a2, bw=0.01), tibble(x, y))
+a3dens <- with(density(a3, bw=0.01), tibble(x, y))
+
+
+a1dens$value <- "No"
+a2dens$value <- "Yes"
+a3dens$value <- "Ignore"
+
+ggplot() +
+    geom_line(aes(x, y, color=value), data=a3dens, size=1) +
+    geom_line(aes(x, y, color=value), data=a1dens, size=1) +
+    geom_line(aes(x, y, color=value), data=a2dens, size=1) +
+    ylab("Density") +
+    xlab("Posterior distribution of α") +
+    scale_color_brewer("Married", palette = "Dark2")
+
+
+```
+
+# Exercice 2
+
+## Question
+
+Reconsider the urban fox analysis from last week’s homework. On the basis of PSIS and WAIC scores, which combination of variables best predicts body weight (W, weight)? How would you interpret the estimates from the best scoring model?
+
+## Answer
+
+### Loading data
+
+```{r}
+data(foxes)
+d.foxes <- tibble(foxes)
+d.foxes$w <- standardize(d.foxes$weight)
+d.foxes$food <- standardize(d.foxes$avgfood)
+d.foxes$gsize <- standardize(d.foxes$groupsize)
+d.foxes
+```
+
+### Modeling
+
+#### Model A
+
+The model A consists of a model in which weight is caused only by the food availabillity, so that $weight \sim \alpha + \beta_{f} * food$.
+
+$w \sim \text{Normal}(\mu, \sigma)\\\mu = \alpha + \beta_{f}*food\\\alpha \sim \text{Normal}(0,0.2)\\\beta_{f} \sim \text{Normal}(0,0.5)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.a <- ulam(
+    alist(
+        w ~ dnorm(mu, sigma),
+        mu <- alpha + beta_f * food,
+        alpha ~ dnorm(0,0.2),
+        beta_f ~ dnorm(0,0.5),
+        sigma ~ dexp(1)
+        ),
+    data=d.foxes, chains=4, cores=4, log_lik=TRUE)
+```
+
+#### Model B
+
+The model B consists of a model in which weight is caused by the food availabillity and group size, so that $weight \sim \alpha + \beta_{f} * food + \beta_g * gsize$.
+
+$w \sim \text{Normal}(\mu, \sigma)\\\mu = \alpha + \beta_{f}*food + \beta{g}*gsize\\\alpha \sim \text{Normal}(0,0.2)\\\beta_{f} \sim \text{Normal}(0,0.5)\\\beta_{g} \sim \text{Normal}(0,0.5)\\\sigma \sim \text{Exponential}(1)$
+
+
+```{r echo=TRUE, results='hide'}
+m.b <- ulam(
+    alist(
+        w ~ dnorm(mu, sigma),
+        mu <- alpha + beta_f * food + beta_g * gsize,
+        alpha ~ dnorm(0,0.2),
+        beta_f ~ dnorm(0,0.5),
+        beta_g ~ dnorm(0,.5),
+        sigma ~ dexp(1)
+        ),
+    data=d.foxes, chains=4, cores=4, log_lik=TRUE)
+```
+
+### Comparing the models
+
+
+```{r}
+precis(m.a)
+precis_plot(precis(m.a))
+```
+
+```{r}
+precis(m.b, depth = 2)
+precis_plot(precis(m.b, depth = 2))
+```
+
+
+```{r echo=TRUE}
+waic.cmp.a.b <- compare(m.a, m.b, func = WAIC)
+row.names(waic.cmp.a.b) <- c("W ~ α + β_f * f", "W ~ α + β_f * f + β_g * g")
+waic.cmp.a.b
+plot(waic.cmp.a.b)
+```
+
+```{r echo=TRUE}
+psis.cmp.a.b <- compare(m.a, m.b, func = PSIS)
+row.names(psis.cmp.a.b) <- c("W ~ α + β_f * f", "W ~ α + β_f * f + β_g * g")
+psis.cmp.a.b
+plot(psis.cmp.a.b)
+```
+
+### Interpretation
+
+The WAIC and PSIS expect that the model `m.a`, defined as $weight \sim \alpha + \beta_{f}*food$, will make slightly better predictions than the model `m.b`, defined as $weight \sim \alpha + \beta_{f}*food + \beta_{groupsize} * groupsize$.
+But as the dWAIC is in both cases smaller than the standard error, it is possible that both models perform equally, or at least the difference in performance is neglectiable.
+
+Although the model `m.b` is causally more correct in giving the direct effect of food availability on weight, the model `m.a.`is the best predictor, because the total effect of food availability on weight is very small (as the availabillity of food leads to more numerous packs which neutralizes the effect of food in weight).
+
+The intercept $\alpha$ should be near 0, as the values were stantardized, meaning that if the food availability is avarage, the foxes will not have a weight distinct from the avarage.
+The slope $\beta_{food}$ indicates that as the availability of food change, there is almost no change in the avarage weight of the foxes, meaning that the association is very low, if it exists at all.
+
+In the case of the model `m.a`, something very similar applies, as the parameters $\beta_f$ and $\beta_g$ are negativelly correlated (and strongly so).
+
+```{r}
+cov2cor(vcov(m.b))
+```
+
+# Exercice 3
+
+## Question
+
+Build a predictive model of the relationship show on the cover of the book, the relationship between the timing of cherry blossoms and March temperature in the same year. The data are found in data(cherry_blossoms). Consider at least two functions to predict doy with temp. Compare them with PSIS or WAIC.
+
+Suppose March temperatures reach 9 degrees by the year 2050. What does your best model predict for the predictive distribution of the day-in-year that
+the cherry trees will blossom?
+
+## Answer
+
+### Loading data
+
+```{r}
+data("cherry_blossoms")
+d.cherry <- (cherry_blossoms)
+d.cherry <- d.cherry[complete.cases(d.cherry$temp,d.cherry$doy),]
+```
+
+### Modeling
+
+#### DAG, causal model
+
+```{r echo=FALSE}
+cherry.dag <- dagitty('dag {
+D [outcome,pos="-0.750,-0.500"]
+T [exposure,pos="-1.000,-0.500"]
+T_l [adjusted,pos="-1.000,-0.250"]
+T_u [adjusted,pos="-1.000,-0.750"]
+Y [pos="-1.250,-0.500"]
+T -> D
+T <-> T_l
+T <-> T_u
+T_l -> D
+T_u -> D
+Y -> T
+Y -> T_l
+Y -> T_u
+}')
+drawdag(cherry.dag)
+```
+
+#### Model SLR A: simple linear regression, unstratified
+
+Model: $doy \sim \alpha + \beta_t * temperature$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \beta_t * temperature_i\\\alpha \sim \text{Normal}(100,10)\\\beta_t \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.slr.a <- ulam(
+    alist(
+        doy ~ dnorm(mu, sigma),
+        mu <- alpha + beta_t * temp,
+        alpha ~ dnorm(100,10),
+        beta_t ~ dnorm(0,10),
+        sigma ~ dexp(1)
+        ),
+    data=d.cherry, chains=4, cores=4, log_lik=TRUE)
+```
+
+```{r}
+precis(m.slr.a)
+precis_plot(precis(m.slr.a))
+```
+
+#### Model SLR B: simple linear regression, stratified by year
+
+Model: $doy \sim \alpha + \beta_t * temperature + \beta_y * year$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \beta_t * temperature_i + \beta_y * year_i\\\alpha \sim \text{Normal}(100,10)\\\beta_t \sim \text{Normal}(0, 10)\\\beta_y \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.slr.b <- ulam(
+    alist(
+        doy ~ dnorm(mu, sigma),
+        mu <- alpha + beta_t * temp + beta_y * year,
+        alpha ~ dnorm(100,10),
+        beta_t ~ dnorm(0,10),
+        beta_y ~ dnorm(0,10),
+        sigma ~ dexp(1)
+        ),
+    data=d.cherry, chains=4, cores=4, log_lik=TRUE)
+```
+
+```{r}
+precis(m.slr.b)
+precis_plot(precis(m.slr.b))
+```
+
+#### Model CLR A: simple cubic regression
+
+Model: $doy \sim \alpha + \sum_{j=1}^{3}{\beta_{t_j} *temperature^j}$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \sum_{j=1}^{3}{\beta_{t_j} *temperature^j}\\alpha \sim \text{Normal}(100,10)\\\beta_{t_j} \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.clr.a <- ulam(
+    alist(
+        doy ~ dnorm(mu, sigma),
+        mu <- alpha + beta_t_1 * temp + beta_t_2 * temp**2 + beta_t_3 * temp**3,
+        alpha ~ dnorm(100,10),
+        beta_t_1 ~ dnorm(0,10),
+        beta_t_2 ~ dnorm(0,10),
+        beta_t_3 ~ dnorm(0,10),
+        sigma ~ dexp(1)
+        ),
+    data=d.cherry, chains=4, cores=4, log_lik=TRUE)
+```
+
+```{r}
+precis(m.clr.a)
+precis_plot(precis(m.clr.a))
+```
+#### Model CLR B: simple cubic regression, stratified by year
+
+Model: $doy \sim \alpha + \sum_{j=1}^{3}{\beta_{t_j} *temperature^j} + \beta_y * year$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \sum_{j=1}^{3}{\beta_{t_j} *temperature^j} + \beta_y * year\\alpha \sim \text{Normal}(100,10)\\\beta_{t_j} \sim \text{Normal}(0, 10)\\\beta_y \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.clr.b <- ulam(
+    alist(
+        doy ~ dnorm(mu, sigma),
+        mu <- alpha + beta_t_1 * temp + beta_t_2 * temp**2 + beta_t_3 * temp**3 + beta_y * year,
+        alpha ~ dnorm(100,10),
+        beta_t_1 ~ dnorm(0,10),
+        beta_t_2 ~ dnorm(0,10),
+        beta_t_3 ~ dnorm(0,10),
+        beta_y ~ dnorm(0,10),
+        sigma ~ dexp(1)
+        ),
+    data=d.cherry, chains=4, cores=4, log_lik=TRUE)
+```
+
+```{r}
+precis(m.clr.b)
+precis_plot(precis(m.clr.b))
+```
+
+#### Model SplR: spline regression (on date)
+
+Model: $doy \sim \alpha + \sum_{k=1}^K{w_k*B_{date,k}}$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \sum_{k=1}^{15}{w_k*B_{date,k,i}}\\\alpha \sim \text{Normal}(100,10)\\w_j \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r}
+num_knots <- 15
+knot_list <- quantile( d.cherry$year , probs=seq(0,1,length.out=num_knots) )
+
+library(splines)
+B <- bs(d.cherry$year,
+    knots=knot_list[-c(1,num_knots)] ,
+    degree=3 , intercept=TRUE )
+
+plot( NULL , xlim=range(d.cherry$year) , ylim=c(0,1) , xlab="year" , ylab="basis" )
+for ( i in 1:ncol(B) ) lines( d.cherry$year , B[,i] )
+
+m.spl.a <- quap(
+    alist(
+        doy ~ dnorm( mu , sigma ) ,
+        mu <- a + B %*% w,
+        a ~ dnorm(100,10),
+        w ~ dnorm(0,10),
+        sigma ~ dexp(1)
+    ), data=list( doy=d.cherry$doy, temp=d.cherry$temp , B=B ) ,
+    start=list( w=rep( 0 , ncol(B) ) ) )
+
+post <- extract.samples( m.spl )
+w <- apply( post$w , 2 , mean )
+plot( NULL , xlim=range(d.cherry$year) , ylim=c(-6,6) ,
+    xlab="year" , ylab="basis * weight" )
+for ( i in 1:ncol(B) ) lines( d.cherry$year , w[i]*B[,i] )
+
+mu <- link(m.spl)
+mu.mean <- apply(mu,2,mean)
+mu.min <- apply(mu,2,PI,prob=0.99)["1%",]
+mu.max <- apply(mu,2,PI,prob=0.99)["100%",]
+
+w_sim <- sim(m.spl)
+w_sim.min <- apply(w_sim,2,PI)['5%',]
+w_sim.max <- apply(w_sim,2,PI)['94%',]
+
+d.cherry %>% ggplot(aes(x=year, y=doy)) +
+    geom_ribbon(aes(ymax=w_sim.max, ymin=w_sim.min), fill='grey', alpha=0.4) +
+    geom_ribbon(aes(ymax=mu.max, ymin=mu.min), fill='blue', alpha=.3) +
+    geom_point(aes(color=temp), alpha=.9) +
+    scale_color_viridis_c(option = 'magma')
+```
+
+### Comparing the models
+
+```{r}
+waic.cmp.cherry <- compare(m.slr.a, m.slr.b, m.clr.a, m.clr.b, m.spl.a, func = WAIC)
+waic.cmp.cherry
+plot(waic.cmp.cherry)
+```
+
+```{r}
+psis.cmp.cherry <- compare(m.slr.a, m.slr.b, m.clr.a, m.clr.b, m.spl.a, func = PSIS)
+psis.cmp.cherry
+plot(psis.cmp.cherry)
+```
+### Predictions
+
+```{r}
+doy_sim_a <- sim(m.slr.a, data = list(year=2050, temp=9))
+doy_sim_b <- sim(m.slr.b, data = list(year=2050, temp=9))
+doy_sim_c_a <- sim(m.clr.a, data = list(year=2050, temp=9))
+doy_sim_c_b <- sim(m.clr.b, data = list(year=2050, temp=9))
+
+B <- bs(list(2050),
+    knots=knot_list[-c(1,num_knots)] ,
+    degree=3 , intercept=TRUE )
+
+doy_sim_spl.a <- sim(m.spl.a, data = list(B=B, temp=9))
+
+doy.slr.a.dens <- with(density(doy_sim_a), tibble(x, y))
+doy.slr.b.dens <- with(density(doy_sim_b), tibble(x, y))
+doy.clr.a.dens <- with(density(doy_sim_c_a), tibble(x, y))
+doy.clr.b.dens <- with(density(doy_sim_c_b), tibble(x, y))
+doy.spl.a.dens <- with(density(doy_sim_spl.a), tibble(x, y))
+
+doy.slr.a.dens$model <- "Linear Model A"
+doy.slr.b.dens$model <- "Linear Model B"
+doy.clr.a.dens$model <- "Cubic Linear Model A"
+doy.clr.b.dens$model <- "Cubic Linear Model B"
+doy.spl.a.dens$model <- "Splines"
+```
+
+```{r}
+ggplot() +
+    geom_line(aes(x,y, color=model), data=doy.slr.a.dens) +
+    geom_line(aes(x,y, color=model), data=doy.slr.b.dens) +
+    geom_line(aes(x,y, color=model), data=doy.clr.a.dens) +
+    geom_line(aes(x,y, color=model), data=doy.clr.b.dens) +
+    geom_line(aes(x,y, color=model), data=doy.spl.a.dens) +
+    xlab('Predicted date of blossom') +
+    ylab('density')
+```
+The models predicts an antecipation of the date of blossom from the avarage 95th to 105th day to the range of 86th to 106th day of the year.
+
+```{r}
+(pi89 <- PI(doy_sim_a))
+
+
+doy.data.dens <- with(density(d.cherry$doy), tibble(x, y))
+doy.data.dens$model <- "Data"
+(pi89.data <- PI(d.cherry$doy))
+
+doy.slr.a.dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_line(aes(x,y), data=doy.data.dens) +
+    geom_area(data=subset(doy.slr.a.dens, x > pi89[1] & x < pi89[2]), aes(fill = model), alpha=0.5) +
+    geom_area(data=subset(doy.data.dens, x > pi89.data[1] & x < pi89.data[2]), aes(fill = model), alpha=0.5) +
+    xlab('Date of blossom') +
+    ylab('density') +
+    labs(title='Observed data and prediction using the best model according to WAIC and PSIS')
+```

@@ -1,0 +1,19 @@
+Version: 1.0
+
+RestoreWorkspace: Yes
+SaveWorkspace: Ask
+AlwaysSaveHistory: Yes
+
+EnableCodeIndexing: Yes
+UseSpacesForTab: Yes
+NumSpacesForTab: 4
+Encoding: UTF-8
+
+RnwWeave: knitr
+LaTeX: XeLaTeX
+
+QuitChildProcessesOnExit: Yes
+
+PythonType: virtualenv
+PythonVersion: 3.9.6
+PythonPath: ~/.pyenv/versions/statreth/bin/python

@@ -1,0 +1,626 @@
+---
+title: "Homework - Week 7"
+author: "Caio Geraldes"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+---
+
+```{r include=FALSE}
+require(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(cmdstanr)
+library(dagitty)
+library(rethinking)
+library(tidyverse)
+
+setMethod( "plot" , "precis" , function(x,y,...) rethinking::precis_plot(x,y,...) )
+setMethod("plot" , "compareIC" , function(x,y,xlim,SE=TRUE,dSE=TRUE,weights=FALSE,...) {
+    dev_in <- x[[1]] - x[[5]]*2 # criterion - penalty*2
+    dev_out <- x[[1]]
+    if ( !is.null(x[['SE']]) ) devSE <- x[['SE']]
+    dev_out_lower <- dev_out - devSE
+    dev_out_upper <- dev_out + devSE
+    if ( weights==TRUE ) {
+        dev_in <- ICweights(dev_in)
+        dev_out <- ICweights(dev_out)
+        dev_out_lower <- ICweights(dev_out_lower)
+        dev_out_upper <- ICweights(dev_out_upper)
+    }
+    n <- length(dev_in)
+    if ( missing(xlim) ) {
+        xlim <- c(min(dev_in),max(dev_out))
+        if ( SE==TRUE & !is.null(x[['SE']]) ) {
+            xlim[1] <- min(dev_in,dev_out_lower)
+            xlim[2] <- max(dev_out_upper)
+        }
+    }
+    main <- colnames(x)[1]
+    set_nice_margins()
+    dotchart( dev_in[n:1] , labels=rownames(x)[n:1] , xlab="deviance" , pch=16 , xlim=xlim , ... )
+    points( dev_out[n:1] , 1:n )
+    mtext(main)
+    # standard errors
+    if ( !is.null(x[['SE']]) & SE==TRUE ) {
+        for ( i in 1:n ) {
+            lines( c(dev_out_lower[i],dev_out_upper[i]) , rep(n+1-i,2) , lwd=0.75 )
+        }
+    }
+    if ( !all(is.na(x@dSE)) & dSE==TRUE ) {
+        # plot differences and stderr of differences
+        dcol <- col.alpha("black",0.5)
+        abline( v=dev_out[1] , lwd=0.5 , col=dcol )
+        diff_dev_lower <- dev_out - x$dSE
+        diff_dev_upper <- dev_out + x$dSE
+        if ( weights==TRUE ) {
+            diff_dev_lower <- ICweights(diff_dev_lower)
+            diff_dev_upper <- ICweights(diff_dev_upper)
+        }
+        for ( i in 2:n ) {
+            points( dev_out[i] , n+2-i-0.5 , cex=0.5 , pch=2 , col=dcol )
+            lines( c(diff_dev_lower[i],diff_dev_upper[i]) , rep(n+2-i-0.5,2) , lwd=0.5 , col=dcol )
+        }
+    }
+})
+```
+
+# Loading the data
+
+```{r}
+data("bangladesh")
+d <- tibble(bangladesh)
+d
+```
+
+```{r}
+district.df <- d %>%
+    group_by(district) %>%
+    summarise(contraception = sum(use.contraception),
+              W = length(woman),
+              prop.contraception = contraception / W,
+              prop.urban = sum(urban) / W,
+              mean.child = sum(living.children)/W) %>%
+    add_row(district=54) %>%
+    arrange(district)
+```
+
+
+# Exercice 1
+
+## Question
+
+The data in data(bangladesh) are 1934 women from the 1989 Bangladesh Fertility Survey. For each woman, we know which district she lived in, her number
+of living.children, her age.centered, whether she lived in an urban center, and finally whether or not she used contraception (use.contraception).
+In this first problem, I only want you to investigate the proportion of women using contraception in each district. Use partial pooling (varying effects). Then compare the varying effect estimates to the raw empirical proportion in each district. Explain the differences between the estimates and the data. Note that district number 54 is absent in the data. This causes some problems in indexing the parameters. The simplest fix is just to tell ulam manually how long the vector should be, like this: vector[61]:a ~ normal(abar,sigma). Pay special attention to district number 54’s estimate.
+
+## Answer
+
+```{r}
+contraception.df <- d %>%
+    group_by(district) %>%
+    summarise(contraception = sum(use.contraception),
+              W = length(woman),
+              prop.contraception = contraception / W)
+
+dat.1 <- list(
+    C = contraception.df$contraception,
+    W = contraception.df$W,
+    D = contraception.df$district
+)
+as_tibble(dat.1)
+```
+
+Model and priors:
+
+$$
+\begin{aligned}
+C_i \sim \text{Binomial}(W, p_i)\\
+\text{logit}(p_i) = \alpha_{D_i}\\
+\alpha_j = \bar{\alpha} + z_{\alpha,j} * \sigma_\alpha\\
+z_{\alpha,j} \sim \text{Normal}(0,1)\\
+\bar{\alpha} \sim \text{Normal}(0,1.5)\\
+\sigma_\alpha \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+```{r results='hide'}
+m1 <- ulam(
+    alist(
+        C ~ dbinom(W, p),
+        logit(p) <- abar + zA[D]*sA,
+        vector[61]:zA ~ dnorm(0, 1),
+        abar ~ dnorm(0, 1.5),
+        sA ~ dexp(1),
+        gq> vector[61]:a <<- abar + zA*sA
+    ),
+    data = dat.1,
+    cores = 4, chains = 4,
+    log_lik = TRUE,
+    file = "m1"
+)
+```
+
+Notice that the varying effect for district 54 is built directly from $\text{Normal}(\bar{\alpha}, \sigma_\alpha)$, as the adaptative parameter $z_{\alpha,54}$ had no data to be updated:
+
+
+```{r}
+precis(m1, depth = 2, pars=c("a[54]", "abar", "sA", "zA[54]"))
+```
+
+The differences between the varying effects and the empirical data seem to be due to a couple of reasons:
+
+- Districts with small number of women do not have enough data to provide a good fit and move the posterior distribution from the population avarage $\bar{\alpha}$ to their empirical values.
+- The model is very skeptical to very low or high values.
+
+```{r fig.width=15, fig.height=5, echo=FALSE}
+p <- link(m1, data=list(D=1:61))
+
+p.mean <- apply(p,2,mean)
+p.hpdi <- apply(p,2,HPDI)
+
+p.df <- tibble(
+    district = 1:61,
+    pmean = p.mean,
+    pmin = p.hpdi[1,],
+    pmax = p.hpdi[2,]
+)
+
+p.df %>%
+    ggplot() +
+    geom_pointrange(aes(x=district, y=pmean, ymin=pmin, ymax=pmax), color=2, size=1) +
+    geom_point(aes(x=district, y=prop.contraception, size=W), shape=1, data=contraception.df) +
+    geom_rug(x=54, sides = "b") +
+    ylab("probability of use of contraceptives") +
+    xlab("district") +
+    labs(title="Posterior distribution of probabilities of use of contraceptives per district",
+         subtitle = "Open points represent the real data, scaled by population size")
+```
+
+
+```{r fig.width=15, fig.height=5, echo=FALSE}
+dat.sim <- list(
+    W = c(contraception.df$W[1:53], round(mean(contraception.df$W)) , contraception.df$W[54:60]),
+    D = c(1:61)
+)
+
+csim <- sim(m1, data=dat.sim)
+
+csim.mean <- apply(csim,2,mean)
+csim.hpdi <- apply(csim,2,HPDI)
+
+csim.df <- tibble(
+    D = 1:61,
+    W = dat.sim$W,
+    cmean = csim.mean,
+    cmin = csim.hpdi[1,],
+    cmax = csim.hpdi[2,]
+)
+
+csim.df %>%
+    ggplot(aes(x=D, y=cmean)) +
+    geom_pointrange(aes(ymin=cmin, ymax=cmax), color=2, size=1) +
+    geom_point(aes(x=district, y=contraception, size=W), shape=1, data=contraception.df) +
+    scale_y_continuous(trans="sqrt") +
+    geom_rug(x=54, sides = "b") +
+    ylab("women employing contraceptives (sqrt scale)") +
+    xlab("district") +
+    labs(title="Simulation of use of contraceptives per district",
+         subtitle = "Open points represent the real data, scaled by population size")
+```
+
+# Exercice 2
+
+## Question
+
+First, draw a DAG that includes all five variables: (1) Uses contraception C (2)
+Age A (3) Children K (4) Urban U (5) District D. You don’t have to be an expert on
+fertility. But do think about which variables can influence which other variables.
+Second, design an estimation strategy to identify both the total and direct causal
+effects of living in an urban center on contraceptive use. Those are your estimands.
+Consider causal relationships among the variables. Then use your DAG to justify
+an adjustment set that will yield the estimate of the causal effect of urban living on
+contraceptive use.
+Do not run a statistical model (yet). I just want you to try to design an analysis. There is no firm right answer. Just apply the backdoor criterion and rules of
+d-separation (the elemental confounds) correctly to the DAG you design.
+
+## Answer
+
+The DAG I will assume comes from the following scientific considerations:
+
+- the number of living children a certain woman increases the likelihood of her making use of contraceptives: $K \rightarrow C$;
+- the longer a woman has lived, the more times she had chances to bear a child: $A \rightarrow K$;
+- younger women are more likely to adopt contraceptive methods: $A \rightarrow C$;
+- urban living affect the number of children a household is able to mantain and/or how much having children contribute to the maintanence of the household: $U \rightarrow K$.
+- urban living provides more access to contraceptives: $U \rightarrow C$;
+- each district offer different levels of type of living, and have different degrees of urbanization: $D \rightarrow U$;
+- different districts might have unobserved features that affect the likelihood of using contraceptive methods: $D \rightarrow C$.
+
+```{r fig.height=2, fig.width=2, echo=FALSE}
+bangladesh.dag <- dagitty('dag{
+    D -> C <- U <- D
+    A -> C <- K <- A
+    U -> K
+    C [outcome, pos="0,0"]
+    D [pos="0,-1"]
+    U [exposure, pos="-1,-1"]
+    A [pos="0,1"]
+    K [pos="-1,1"]
+}')
+drawdag(bangladesh.dag)
+```
+
+To access the total effect of urban living on contraceptive use, it is necessary to adjust by disctric, as district is a cofound.
+
+```{r}
+adjustmentSets(bangladesh.dag, effect = "total")
+```
+
+To access the direct effect of urban living on contraceptive use, it is necessary to adjust by district (cofund), living children (cofund) and age, as by adjusting by children a collider path is open between urban living and age.
+
+```{r}
+adjustmentSets(bangladesh.dag, effect = "direct")
+```
+
+# Exercice 3
+
+## Question
+
+Now build one or more statistical models to estimate the total and the direct
+causal effects of urban living on contraceptive use. Again include district as a simple
+varying effect (as in problem 1) so that each district has its own average contraceptive
+use. You may also want to stratify the effect of urban living by district. If you do,
+think carefully about how to do this statistically.
+
+## Answer
+
+### Data transformation
+
+```{r}
+dat.2 <- data.frame(
+    D = d$district,
+    C = d$use.contraception,
+    K = d$living.children,
+    A = d$age.centered,
+    U = ifelse(d$urban, 2, 1)
+)
+
+head(dat.2)
+```
+
+### Modeling
+
+#### Total effect of urban living on contraceptive use
+
+$$
+\begin{aligned}
+C_i \sim \text{Bernoulli}(p_i)\\
+\text{logit}(p_i) = \alpha_{D_i} + \bar{\beta}_{U_i} + \beta_{D_i,U_i}\\
+\alpha_j = \bar{\alpha} + z_{\alpha,j} * \sigma_\alpha\\
+\beta = (\text{diag}(\textbf{S}_β)\textbf{L}_β\textbf{Z}_{U,β})^\intercal\\
+\bar{\beta}_j = z_{\bar{\beta},j}*\tau_\beta\\
+z_{\alpha,j}, z_{\bar{\beta},j} \sim \text{Normal}(0,1)\\
+\bar{\alpha} \sim \text{Normal}(0,1)\\
+\textbf{Z}_{U,β} \sim \text{Normal}(0,1)\\
+\sigma_\alpha, \tau_\beta, \textbf{S}_{B,j} \sim \text{Exponential}(1)\\
+\textbf{R}_\beta \sim \text{LKJcorr}(2)
+\end{aligned}
+$$
+```{r results='hide'}
+dat.3 <- as.list(dat.2)
+dat.3$N_districts <- 61
+
+mUDd <- ulam(
+    alist(
+        C ~ bernoulli(p),
+        logit(p) <- a[D] + bbar[U] + b[D,U],
+        
+        # adpatative
+        transpars> matrix[N_districts,2]:b <- compose_noncentered(rep_vector(sigma_B, 2), L_Rho_B, zB),
+        transpars> vector[61]:a <<- abar + zA*sA,
+        transpars> vector[2]: bbar <<- zBbar*tau_B,
+        
+        # fixed
+        vector[61]:zA ~ normal(0,1),
+        matrix[2,N_districts]:zB ~ normal(0,1),
+        vector[2]: zBbar ~ normal(0,1),
+        abar ~ normal(0, 1),
+        tau_B ~ exponential(1),
+        sA ~ exponential(1),
+        sigma_B ~ exponential(1),
+        cholesky_factor_corr[2]:L_Rho_B ~ lkj_corr_cholesky(2),
+        
+        gq> matrix[2,2]:Rho_B <<- Chol_to_Corr(L_Rho_B)
+    ),
+    data = dat.3,
+    cores = 6, chains = 6,
+    log_lik = TRUE,
+    file = "m.ud.cormatrix"
+)
+```
+
+##### Effect
+
+```{r}
+ps.mUD <- extract.samples(mUDd)
+```
+
+```{r fig.width=15, fig.height=5}
+alpha <- inv_logit(ps.mUD$a)
+
+alpha.lhpdi <- apply(alpha,2,HPDI)["|0.89",]
+alpha.hhpdi <- apply(alpha,2,HPDI)["0.89|",]
+alpha.mean <- apply(alpha,2,mean)
+
+alpha.df <- tibble(
+    lhpdi = alpha.lhpdi,
+    hhpdi = alpha.hhpdi,
+    mean = alpha.mean,
+    district = 1:61
+)
+
+alpha.df %>%
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi), color = 2) +
+    geom_point(aes(x=district, y=prop.contraception, size=W), shape=1, data=contraception.df) +
+    geom_rug(x=54, sides = "b") +
+    geom_hline(yintercept = 0.367) +
+    ylab("probability of use of contraceptives") +
+    xlab("district") +
+    labs(title="Posterior distribution of probabilities of use of contraceptives per district",
+         subtitle = "Open points represent the real data, scaled by population size")
+```
+
+
+
+```{r fig.width=15, fig.height=10}
+beta <- inv_logit(ps.mUD$b)
+dimnames(beta)[[3]] <- c("rural", "urban")
+
+beta.lhpdi <- c(apply(beta,c(2,3),HPDI)["|0.89",,"rural"],apply(beta,c(2,3),HPDI)["|0.89",,"urban"])
+beta.hhpdi <- c(apply(beta,c(2,3),HPDI)["0.89|",,"rural"],apply(beta,c(2,3),HPDI)["0.89|",,"urban"])
+beta.mean <- c(apply(beta,c(2,3),mean)[,"rural"],apply(beta,c(2,3),mean)[,"urban"])
+
+beta.df <- tibble(
+    lhpdi = beta.lhpdi,
+    hhpdi = beta.hhpdi,
+    mean = beta.mean,
+    district = rep(1:61,2),
+    urban = c(rep("rural", 61), rep("urban", 61))
+)
+
+beta.df %>% 
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi, color=urban), size=1.2, shape=21, fill='white') +
+    geom_line(aes(x=as.numeric(district), y=mean), data=alpha.df) +
+    facet_wrap(~ urban, nrow=2) +
+    xlab("district") + ylab("posterior distribution of β_jk (prob)") +
+    labs(title="Posterior distribution of probabilities of use of contraceptives per district and urbanicity",
+         subtitle="Dashed line corresponding to avarage predicted use of contraceptives in the district")
+```
+
+```{r fig.width=15, fig.height=5}
+beta.diff <- beta[,,2] - beta[,,1]
+
+beta.diff.mean <- apply(beta.diff,2,mean)
+beta.diff.lhpdi <- apply(beta.diff,2,HPDI)["|0.89",]
+beta.diff.hhpdi <- apply(beta.diff,2,HPDI)["0.89|",]
+
+b.diff.df <- tibble(
+    district = 1:61,
+    mean = beta.diff.mean,
+    lhpdi = beta.diff.lhpdi,
+    hhpdi = beta.diff.hhpdi,
+    prop.urban = district.df$prop.urban,
+    n_women = district.df$W
+    )
+
+b.diff.df %>%
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi, color=prop.urban), size=1.3, shape = 21, fill="white") +
+    geom_hline(yintercept = 0, linetype=2) +
+    ylab("difference of use of contraceptives (U-R)") +
+    xlab("district") +
+    labs(title="Contrast of use of contraceptives per district") +
+    scale_color_viridis_c("Proportion of urban living women")
+```
+
+#### Direct effect of urban living on contraceptive use
+
+$$
+\begin{aligned}
+C_i \sim \text{Bernoulli}(p_i)\\
+\text{logit}(p_i) = \alpha_{D_i} + \bar{\beta}_{U_i} + \beta_{D_i,U_i} + \gamma*K + \delta*A\\
+\alpha_j = \bar{\alpha} + z_{\alpha,j} * \sigma_\alpha\\
+\beta = (\text{diag}(\textbf{S}_β)\textbf{L}_β\textbf{Z}_{U,β})^\intercal\\
+\gamma = z_\gamma * \sigma_\gamma\\
+\delta = z_\delta * \sigma_\delta\\
+\bar{\beta}_j = z_{\bar{\beta},j}*\tau_\beta\\
+z_{\alpha,j}, z_{\bar{\beta},j}, z_\gamma, z_\delta \sim \text{Normal}(0,1)\\
+\bar{\alpha} \sim \text{Normal}(0,1)\\
+\textbf{Z}_{U,β} \sim \text{Normal}(0,1)\\
+\sigma_\alpha, \sigma_\gamma,\sigma_\delta, \tau_\beta, \textbf{S}_{B,j} \sim \text{Exponential}(1)\\
+\textbf{R}_\beta \sim \text{LKJcorr}(2)
+\end{aligned}
+$$
+```{r results='hide'}
+mUdir <- ulam(
+    alist(
+        C ~ bernoulli(p),
+        logit(p) <- a[D] + bbar[U] + b[D,U] + zG*sG*K + zD*sD*A,
+        
+        # adpatative
+        transpars> matrix[N_districts,2]:b <- compose_noncentered(rep_vector(sigma_B, 2), L_Rho_B, zB),
+        transpars> vector[61]:a <<- abar + zA*sA,
+        transpars> vector[2]: bbar <<- zBbar*tau_B,
+        zG ~ normal(0,1),
+        zD ~ normal(0,1),
+        
+        # fixed
+        vector[61]:zA ~ normal(0,1),
+        matrix[2,N_districts]:zB ~ normal(0,1),
+        vector[2]: zBbar ~ normal(0,1),
+        abar ~ normal(0, 1),
+        tau_B ~ exponential(1),
+        sA ~ exponential(1),
+        sG ~ exponential(1),
+        sD ~ exponential(1),
+        sigma_B ~ exponential(1),
+        cholesky_factor_corr[2]:L_Rho_B ~ lkj_corr_cholesky(2),
+        
+        gq> matrix[2,2]:Rho_B <<- Chol_to_Corr(L_Rho_B),
+        gq> real[1]:g <<- zG*sG,
+        gq> real[1]:d <<- zD*sD
+    ),
+    data = dat.3,
+    cores = 6, chains = 6,
+    log_lik = TRUE,
+    file = "m.udir.cormatrix"
+)
+```
+
+```{r}
+precis(mUdir)
+```
+
+##### Effect
+
+```{r}
+ps.mUD <- extract.samples(mUdir)
+```
+
+```{r fig.width=15, fig.height=5}
+alpha <- inv_logit(ps.mUD$a)
+
+alpha.lhpdi <- apply(alpha,2,HPDI)["|0.89",]
+alpha.hhpdi <- apply(alpha,2,HPDI)["0.89|",]
+alpha.mean <- apply(alpha,2,mean)
+
+alpha.df <- tibble(
+    lhpdi = alpha.lhpdi,
+    hhpdi = alpha.hhpdi,
+    mean = alpha.mean,
+    district = 1:61
+)
+
+alpha.df %>%
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi), color = 2) +
+    geom_point(aes(x=district, y=prop.contraception, size=W), shape=1, data=contraception.df) +
+    geom_rug(x=54, sides = "b") +
+    geom_hline(yintercept = mean(inv_logit(ps.mUD$abar))) +
+    ylab("probability of use of contraceptives") +
+    xlab("district") +
+    labs(title="Posterior distribution of probabilities of use of contraceptives per district",
+         subtitle = "Open points represent the real data, scaled by population size")
+```
+
+
+
+```{r}
+beta <- inv_logit(ps.mUD$b)
+dimnames(beta)[[3]] <- c("rural", "urban")
+
+bbar <- inv_logit(ps.mUD$bbar)
+dimnames(bbar)[[2]] <- c("rural", "urban")
+```
+
+```{r fig.width=15, fig.height=5}
+beta.diff <- beta[,,2] - beta[,,1]
+
+beta.diff.mean <- apply(beta.diff,2,mean)
+beta.diff.lhpdi <- apply(beta.diff,2,HPDI)["|0.89",]
+beta.diff.hhpdi <- apply(beta.diff,2,HPDI)["0.89|",]
+
+b.diff.df <- tibble(
+    district = 1:61,
+    mean = beta.diff.mean,
+    lhpdi = beta.diff.lhpdi,
+    hhpdi = beta.diff.hhpdi,
+    prop.urban = district.df$prop.urban,
+    )
+
+b.diff.df %>%
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi, color=prop.urban), size=1.3, shape = 21, fill="white") +
+    geom_hline(yintercept = 0, linetype=2) +
+    ylab("difference of use of contraceptives (U-R)") +
+    xlab("district") +
+    labs(title="Contrast of use of contraceptives per district in urban and rural lifestyles") +
+    scale_color_viridis_c("Proportion of urban living women")
+```
+
+```{r fig.width=15, fig.height=10}
+rural.df <- inv_logit(ps.mUD$bbar[,1] + ps.mUD$b[,,1]) %>%
+    as_tibble() %>%
+    pivot_longer(everything()) %>%
+    add_column(urban='rural', .before = 'name') %>%
+    mutate(name = str_remove(name, "V"))
+urban.df <- inv_logit(ps.mUD$bbar[,2] + ps.mUD$b[,,2]) %>%
+    as_tibble() %>%
+    pivot_longer(everything()) %>%
+    add_column(urban='urban', .before = 'name') %>%
+    mutate(name = str_remove(name, "V"))
+
+urban.effect.df <- tibble(
+    urban = c(rural.df$urban, urban.df$urban),
+    district = c(rural.df$name, urban.df$name),
+    value = c(rural.df$value, urban.df$value),
+) %>% group_by(urban, district) %>%
+    mutate(mean = mean(value),
+           lhpdi = HPDI(value)[1],
+           hhpdi = HPDI(value)[2]) %>%
+    select(urban, district, mean, lhpdi, hhpdi) %>%
+    distinct() %>%
+    ungroup()
+
+
+urban.effect.df$prop.urban = rep(district.df$W,2)
+    
+
+urban.effect.df %>%
+    ggplot(aes(y=mean, x=as.numeric(district))) +
+    geom_ribbon(data=alpha.df, aes(ymin=lhpdi, ymax=hhpdi), alpha=0.2) +
+    geom_pointrange(aes(ymin=lhpdi, ymax=hhpdi), size=1.3, color=2, shape = 21, fill="white") +
+    geom_line(data=alpha.df) +
+    ylab("posterior distribution of β_bar + β_j,k (prob)") +
+    xlab("district") +
+    labs(title="Use of contraceptives per district in urban and rural lifestyles") +
+    facet_wrap(~ urban, nrow = 2) +
+    scale_color_viridis_c("N women (log10)")
+```
+
+```{r fig.height=5, fig.width=5}
+tibble(
+rural = (urban.effect.df %>% dplyr::filter(urban=='rural'))$mean,
+urban = (urban.effect.df %>% dplyr::filter(urban=='urban'))$mean,
+district = 1:61
+) %>%
+    ggplot(aes(y=rural, x=urban)) +
+    geom_point(size=5,alpha=0.7, color=3) +
+    labs(title="Posterior mean of β_bar + β_j,k (prob) per urbanicity") 
+    
+```
+
+```{r}
+gamma <- inv_logit(ps.mUD$g)
+
+qplot(x=gamma, geom="density")
+
+delta <- inv_logit(ps.mUD$d)
+
+qplot(x=delta, geom="density")
+
+tibble(d=delta, g=gamma) %>%
+    ggplot(aes(x=d, y=g)) +
+    geom_density_2d()
+```
+
+# Model evaluation
+
+
+```{r}
+compare(mUDd, mUdir)
+```
+

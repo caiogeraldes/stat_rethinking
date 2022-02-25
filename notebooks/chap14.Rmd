@@ -1,0 +1,122 @@
+---
+title: "Chapter 14"
+author: "Caio Geraldes"
+output:
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+---
+
+```{r include=FALSE}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(cmdstanr)
+library(dagitty)
+library(rethinking)
+library(tidyverse)
+library(MASS)
+```
+
+## Generative model
+
+```{r}
+a <- 3.5
+b <- (-1)
+sigma_a <- 1
+sigma_b <- 0.5
+rho <- (-0.7)
+
+Mu <- c(a, b)
+sigmas <- c(sigma_a, sigma_b)
+Rho <- matrix(c(1, rho, rho, 1), nrow=2) # correlation matrix
+Sigma <- diag(sigmas) %*% Rho %*% diag(sigmas)
+
+N_cafes <- 20
+
+set.seed(5)
+vary_effects <- mvrnorm(N_cafes, Mu, Sigma)
+
+a_cafe <- vary_effects[,1]
+b_cafe <- vary_effects[,2]
+```
+
+```{r fig.width=6, fig.height=6, echo=FALSE}
+d <- tibble(a = a_cafe, b = b_cafe)
+d %>%
+    ggplot(aes(x=a, y=b)) +
+    geom_point(color=2, shape=1, size=2) +
+    stat_ellipse(type="norm", alpha=0.3, level=0.1) +
+    stat_ellipse(type="norm", alpha=0.3, level=0.3) +
+    stat_ellipse(type="norm", alpha=0.3, level=0.5) +
+    stat_ellipse(type="norm", alpha=0.3, level=0.8) +
+    stat_ellipse(type="norm", alpha=0.3, level=0.99)
+```
+
+## Simulating observations
+
+```{r}
+set.seed(22)
+N_visits <- 10
+afternoon <- rep(0:1, N_visits*N_cafes/2)
+cafe_id <- rep(1:N_cafes, each = N_visits)
+mu <- a_cafe[cafe_id] + b_cafe[cafe_id]*afternoon
+sigma  <- 0.5
+wait <- rnorm(N_visits*N_cafes, mu, sigma)
+d <- tibble(cafe = cafe_id, afternoon = afternoon, wait = wait)
+
+d %>% sample_n(10)
+```
+
+## Varying slopes model
+
+$$
+\begin{aligned}
+W_i \sim \text{Normal}(\mu_i, \sigma)\\
+\mu_i = \alpha_{C_i} + \beta_{C_i}A_i\\
+\begin{bmatrix}\alpha_C\\\beta_C \end{bmatrix} \sim \text{MVNormal}\left(\begin{array}{c}\begin{bmatrix}\alpha\\\beta\end{bmatrix}, \textbf{S}\end{array}\right)\\
+\textbf{S} = \begin{pmatrix}\sigma_\alpha & 0\\ 0 & \sigma_\beta\end{pmatrix} \textbf{R} \begin{pmatrix}\sigma_\alpha & 0\\0 & \sigma_\beta\end{pmatrix}\\
+\alpha \sim \text{Normal}(5,2)\\
+\beta \sim \text{Normal}(-1, 0.5)\\
+\sigma \sim \text{Exponential}(1)\\
+\sigma_\alpha \sim \text{Exponential}(1)\\
+\sigma_\beta \sim \text{Exponential}(1)\\
+\textbf{R} \sim \text{LKJcorr}(2)
+\end{aligned}
+$$
+
+```{r results="hide"}
+set.seed(867530)
+
+f.14.1 <- alist(
+  wait ~ normal(mu, sigma),
+  mu <- a_cafe[cafe] + b_cafe[cafe]*afternoon,
+
+  # adaptative priors
+  c(a_cafe, b_cafe)[cafe] ~ multi_normal(c(a, b), Rho, sigma_cafe),
+
+  # fixed priors
+  a ~ normal(5,2),
+  b ~ normal(-1,0.5),
+  sigma_cafe ~ exponential(1),
+  sigma ~ exponential(1),
+  Rho ~ lkj_corr(2)
+)
+
+m14.1 <- ulam(
+  flist = f.14.1,
+  data = d,
+  chains = 4,
+  cores = 4,
+  file = './models/cafes.1'
+)
+```
+
+```{r fig.width=4, fig.height=4, echo=FALSE}
+post <- extract.samples(m14.1)
+
+ggplot(aes(x=Rho), data = tibble(Rho = post$Rho[,1,2])) +
+    geom_density(bw=0.017, color=2, size=1) +
+    geom_density(data=tibble(Rho=R[,1,2]), linetype=2, bw=0.017) +
+    xlab("correlation")
+```

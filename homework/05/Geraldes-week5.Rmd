@@ -1,0 +1,509 @@
+---
+title: "Homework - Week 5"
+author: "Caio Geraldes"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    number_sections: yes
+---
+
+```{r include=FALSE}
+library(cmdstanr)
+library(dagitty)
+library(rethinking)
+library(tidyverse)
+
+setMethod( "plot" , "precis" , function(x,y,...) rethinking::precis_plot(x,y,...) )
+setMethod("plot" , "compareIC" , function(x,y,xlim,SE=TRUE,dSE=TRUE,weights=FALSE,...) {
+    dev_in <- x[[1]] - x[[5]]*2 # criterion - penalty*2
+    dev_out <- x[[1]]
+    if ( !is.null(x[['SE']]) ) devSE <- x[['SE']]
+    dev_out_lower <- dev_out - devSE
+    dev_out_upper <- dev_out + devSE
+    if ( weights==TRUE ) {
+        dev_in <- ICweights(dev_in)
+        dev_out <- ICweights(dev_out)
+        dev_out_lower <- ICweights(dev_out_lower)
+        dev_out_upper <- ICweights(dev_out_upper)
+    }
+    n <- length(dev_in)
+    if ( missing(xlim) ) {
+        xlim <- c(min(dev_in),max(dev_out))
+        if ( SE==TRUE & !is.null(x[['SE']]) ) {
+            xlim[1] <- min(dev_in,dev_out_lower)
+            xlim[2] <- max(dev_out_upper)
+        }
+    }
+    main <- colnames(x)[1]
+    set_nice_margins()
+    dotchart( dev_in[n:1] , labels=rownames(x)[n:1] , xlab="deviance" , pch=16 , xlim=xlim , ... )
+    points( dev_out[n:1] , 1:n )
+    mtext(main)
+    # standard errors
+    if ( !is.null(x[['SE']]) & SE==TRUE ) {
+        for ( i in 1:n ) {
+            lines( c(dev_out_lower[i],dev_out_upper[i]) , rep(n+1-i,2) , lwd=0.75 )
+        }
+    }
+    if ( !all(is.na(x@dSE)) & dSE==TRUE ) {
+        # plot differences and stderr of differences
+        dcol <- col.alpha("black",0.5)
+        abline( v=dev_out[1] , lwd=0.5 , col=dcol )
+        diff_dev_lower <- dev_out - x$dSE
+        diff_dev_upper <- dev_out + x$dSE
+        if ( weights==TRUE ) {
+            diff_dev_lower <- ICweights(diff_dev_lower)
+            diff_dev_upper <- ICweights(diff_dev_upper)
+        }
+        for ( i in 2:n ) {
+            points( dev_out[i] , n+2-i-0.5 , cex=0.5 , pch=2 , col=dcol )
+            lines( c(diff_dev_lower[i],diff_dev_upper[i]) , rep(n+2-i-0.5,2) , lwd=0.5 , col=dcol )
+        }
+    }
+})
+```
+
+```{r}
+data("NWOGrants")
+d <- tibble(NWOGrants)
+d
+```
+
+# Exercice 1
+
+## Question
+
+The data in data(NWOGrants) are outcomes for scientific funding applications for the Netherlands Organization for Scientific Research (NWO) from 2010–2012 (see van der Lee and Ellemers doi:10.1073/pnas.1510159112). These data have a very similar structure to the UCBAdmit data discussed in Chapter 11. Draw a DAG for this sample and then use one or more binomial GLMs to estimate the TOTAL causal effect of gender on grant awards.
+
+## Answer
+
+### DAG
+
+```{r echo=FALSE}
+nwo.dag <- dagitty('
+    dag{
+    A [outcome, pos="2,1"]
+    G [exposure, pos="1,1"]
+    D [outcome, pos="1.5,-1"]
+    G -> D
+    G -> A
+    D -> A
+    }
+    ')
+drawdag(nwo.dag)
+```
+
+### Indexing data
+
+```{r}
+dat <- data.frame(gid = ifelse(d$gender == "m", 1, 2)) # M = 1, F = 2
+dat$awards <- d$awards
+dat$applications <- d$applications
+dat$disid <- as.integer(d$discipline)
+dat$discipline <- d$discipline
+dat
+```
+
+### Modeling: total causal effect:
+
+$A_i \sim \text{Binomial}(N_{\text{applications}}, p_i)\\\text{logit}(p_i) = \alpha_{G_i}\\\alpha_j \sim \text{Normal}(0, 1.5)$
+
+```{r echo=TRUE, results='hide'}
+glm.t <- ulam(
+    alist(
+        awards ~ dbinom(applications, p),
+        logit(p) <- a[gid],
+        a[gid] ~ dnorm(0, 1.5)
+    ),
+    data = dat,
+    chains = 4,
+    cores = 4,
+    log_lik = TRUE
+)
+```
+
+```{r}
+precis(glm.t, depth = 2)
+plot(precis(glm.t, depth = 2))
+```
+
+### Evaluation
+
+```{r}
+ps.glm.t <- extract.samples(glm.t)
+precis(ps.glm.t, depth = 2)
+plot(precis(ps.glm.t, depth = 2))
+
+a.f <- inv_logit(ps.glm.t$a[,2])
+a.m <- inv_logit(ps.glm.t$a[,1])
+
+a.f.dens <- with(density(a.f), tibble(x,y))
+a.f.dens$gender <- 'F'
+a.m.dens <- with(density(a.m), tibble(x,y))
+a.m.dens$gender <- 'M'
+hpdi.a.f <- HPDI(a.f)
+hpdi.a.m <- HPDI(a.m)
+
+a.f.dens %>% 
+    ggplot(aes(x=x,y=y,color=gender)) +
+    geom_line() +
+    geom_line(data=a.m.dens) +
+    geom_area(data=subset(a.f.dens, x > hpdi.a.f[1] & x < hpdi.a.f[2]),
+              aes(fill=gender), alpha = 0.4) +
+    geom_area(data=subset(a.m.dens, x > hpdi.a.m[1] & x < hpdi.a.m[2]),
+              aes(fill=gender), alpha = 0.4) +
+    ylab('density') +
+    xlab('posterior distribution of α')
+```
+
+The gender contrast probability is small (0.89 HPDI interval from 0.5% to 4.7%), but still bigger than 0, showing a total male advantage on average.
+
+```{r}
+diff_a_p <- a.m - a.f
+#diff_a_logit <- ps.glm.t$a[,1] - ps.glm.t$a[,2]
+#precis( list( diff_p=diff_a_p , diff_a=diff_a_logit ) )
+#plot(precis( list( diff_p=diff_a_p , diff_a=diff_a_logit ) ))
+
+diff_a.dens <- with(density(diff_a_p), tibble(x,y))
+(hpdi.diff_a <- HPDI(diff_a_p))
+
+diff_a.dens %>%
+    ggplot(aes(x=x,y=y)) +
+    geom_line(color= 2, size = 2) +
+    geom_area(data=subset(diff_a.dens, x > hpdi.diff_a[1] & x < hpdi.diff_a[2]),
+              fill = 2, alpha=0.4) +
+    geom_vline(xintercept = 0) +
+    ylab('density') +
+    xlab('Gender contrast (probability)') +
+    annotate(x=-.010, y=20, geom='text',
+             label='italic("women adv")', parse = TRUE) +
+    annotate(x=.060, y=20, geom='text',
+             label='italic("men adv")', parse = TRUE)
+```
+The predictions are right in 55% of the times (5 out of a total of 9 lines in the plot bellow show smaller number of awards granted for women).
+
+```{r}
+postcheck(glm.t)
+for ( i in 1:17 ) {
+    x <- 1 + 2*(i-1)
+    y1 <- d$awards[x]/d$applications[x]
+    y2 <- d$awards[x+1]/d$applications[x+1]
+    lines( c(x,x+1) , c(y1,y2) , col=rangi2 , lwd=2 )
+    text( x+0.5 , (y1+y2)/2 + 0.22 ,
+          d$discipline[x] , cex=.75 , col=rangi2, srt=90)
+}
+```
+
+# Exercice 2
+
+## Question
+
+Now estimate the DIRECT causal effect of gender on grant awards. Compute the average direct causal effect of gender, weighting each discipline in proportion to the number of applications in the sample. Refer to the marginal effect example in Lecture 9 for help.
+
+## Answer
+
+### Modeling: direct causal effect (indexing)
+
+$A_i \sim \text{Binomial}(N_{\text{applications}}, p_i)\\\text{logit}(p_i) = \alpha_{G_i,D_i}\\\alpha_j \sim \text{Normal}(0, 1.5)$
+
+```{r echo=TRUE, results='hide'}
+glm.d <- ulam(
+    alist(
+        awards ~ dbinom(applications, p),
+        logit(p) <- a[gid,disid],
+        matrix[gid,disid]:a ~ dnorm(0, 1.5)
+    ),
+    data = dat,
+    chains = 4,
+    cores = 4,
+    log_lik = TRUE
+)
+```
+
+```{r d_a_precis}
+precis(glm.d, depth = 3)
+plot(precis(glm.d, depth = 3))
+```
+
+##### Interpretation
+
+```{r}
+ps.glm.d <- extract.samples(glm.d)
+precis(ps.glm.d, depth = 3)
+plot(precis(ps.glm.d, depth = 3))
+```
+
+```{r gender_contrast}
+PrA <- inv_logit(ps.glm.d$a)
+diff_prob_D <- sapply(1:9, function(i) PrA[,1,i] - PrA[,2,i])
+
+colnames(diff_prob_D) <- levels(d$discipline)
+diff.df <- as_tibble(diff_prob_D) %>% 
+    pivot_longer(everything())
+
+d2 <- d %>%
+    group_by(discipline) %>% 
+    summarise(across(c(applications, awards), ~ sum(.x))) %>%
+    mutate(apa = awards/applications) %>%
+    column_to_rownames(var='discipline')
+d2$male.pct <- pg.df$male
+d2$male.total <- d[d$gender=='m',]$applications
+d2$female.pct <- pg.df$female
+d2$female.total <- d[d$gender=='f',]$applications
+
+diff.df <- diff.df %>%
+    rowwise() %>% 
+    mutate(N = d2[name, 'applications'])
+
+diff.df %>%
+    ggplot(aes(x=value, size=N)) +
+    geom_density(aes(color=name)) +
+    geom_vline(xintercept = 0) +
+    labs(color="Discipline") +
+    xlab("Gender contrast (probability)") +
+    ylab("Density") +
+    annotate(x=-.25, y=12, geom='text', label='women adv') +
+    annotate(x=.25, y=12, geom='text', label='men adv') +
+    scale_size_binned("Applications", range=c(0,3))
+```
+
+The predictions in this model represent the data more properly than the model `glm.t`, as it takes into account the advantage that women might get in some disciplines.
+Notice, however, that the model has too much uncertainty built-in it in regard to the Physics discipline, and less so in regard to Chemical and Physical sciences.
+This is likely to be caused by the fact that they have the lowest total number of applications (76,122 and 174, respectively).
+
+```{r}
+postcheck(glm.d)
+for ( i in 1:17 ) {
+    x <- 1 + 2*(i-1)
+    y1 <- d$awards[x]/d$applications[x]
+    y2 <- d$awards[x+1]/d$applications[x+1]
+    lines( c(x,x+1) , c(y1,y2) , col=rangi2 , lwd=2 )
+    text( x+0.5 , (y1+y2)/2 + 0.22 ,
+          d$discipline[x] , cex=.75 , col=rangi2, srt=90)
+}
+```
+
+### Interpretation of the results
+
+#### Higher percentage of male applicants
+
+Four of the observed disciplines have more than 2 times the number of male applicants for awards than female applicants. Those are: 'Physics', 'Physical sciences', 'Technical sciences', and 'Chemical sciences. Physics in particular have 7 times more male applicants.
+One hypothesis is that such disciplines would more likely award male applicants.
+
+
+```{r}
+pg <- with( dat , sapply( 1:9 , function(k)
+applications[disid==k]/sum(applications[disid==k]) ) )
+rownames(pg) <- c('male', 'female')
+colnames(pg) <- levels(d$discipline)
+pg.df <- round(pg, 2) %>%  
+    t() %>%
+    as.data.frame()
+pg.df %>% arrange(desc(male))
+```
+
+The plot bellow does now confirm the proposed hypothesis as the disciplines are exactly those whose gender contrast probability has its mean closer to 0.
+They share, nevertheless the higher standard deviations across in the posterior distribution contrast.
+
+```{r}
+diff.df$mostly_male <- ifelse(diff.df$name %in% c('Physics',
+                                                  'Physical sciences',
+                                                   'Technical sciences',
+                                                   'Chemical sciences'), 
+                              yes = 'Mostly male', no = 'Evenly distributed')
+
+diff.df %>% 
+    ggplot(aes(x=value)) +
+    geom_density(aes(color=name)) +
+    geom_vline(xintercept = 0) +
+    labs(color="Discipline") +
+    xlab("Gender contrast (probability)") +
+    ylab("Density") +
+    annotate(x=-.25, y=12, geom='text',
+             label='italic("women adv")', parse = TRUE) +
+    annotate(x=.25, y=12, geom='text',
+             label='italic("men adv")', parse = TRUE) +
+    facet_wrap(~ mostly_male)
+```
+
+#### Marginal causal effect
+
+```{r mce}
+total_apps <- sum(dat$applications)
+
+apps_per_dis <- d2$applications
+
+# simulate as if all apps from men
+p_G1 <- link(glm.d, data=list(
+    disid = rep(1:9, times=apps_per_dis),
+    applications = rep(1, total_apps),
+    gid = rep(1, total_apps)))
+
+# simulate as if all apps from women
+p_G2 <- link(glm.d, data=list(
+    disid = rep(1:9, times=apps_per_dis),
+    applications = rep(1, total_apps),
+    gid = rep(2, total_apps)))
+
+
+p_diff <- flatten_dbl(as.list(p_G1 - p_G2))
+(hpdi.p_diff <- HPDI(p_diff))
+
+p_diff.dens <- with(density(p_diff, bw=0.0015), tibble(x,y))
+p_diff.dens %>%
+    ggplot(aes(x, y)) +
+    geom_line(color=2, size=1.5) +
+    geom_vline(xintercept = 0) +
+    xlab("effect of gender perception") +
+    ylab("Density") +
+    geom_area(data=subset(p_diff.dens, x > hpdi.p_diff[1] & x < hpdi.p_diff[2]),
+              fill = 2, alpha=0.4) +
+    annotate(x=-.15, y=5, geom='text',
+             label='italic("women adv")', parse = TRUE) +
+    annotate(x=.15, y=5, geom='text',
+             label='italic("men adv")', parse = TRUE) 
+```
+
+#### Counterfactual Simulation
+
+##### Even number of men and women apply for an award in each discipline
+
+Suppose that for each discipline, 1000 candidates apply for an award, 500 men and 500 women.
+If a given discipline has a particular discriminatory tendency towards awarding women, it is expected that such discipline would still award men more than women.
+The simulated data bellow shows that our model predict very little difference in the general assignment of awards if an even number of male and female candidates apply.
+Disciplines that on average awarded more male candidates in the prediction on the training data did the same (e.g..: Earth/life sciences), as those with an opposite behaviour (e.g..: Interdisciplinary).
+Nevertheless, they are now more spread, showing that a considerable amount of uncertainty was added to the system.
+
+```{r, message=FALSE}
+napl <- 500
+
+d3 <- data.frame(list(
+    applications = c(napl,napl),
+    gid = c(1,2),
+    disid = c(1,1)))
+        
+simulation <- sim(glm.d, data=d3, n=3000)
+
+d_sim <- ((simulation[,1] / napl) - (simulation[,2]) / napl)
+N_awards <- mean(simulation[,1] + simulation[,2])
+
+d4 <- tibble(d_sim = d_sim)
+d4$discipline <- levels(d$discipline)[1]
+d4$N <- N_awards
+
+for (i in 2:9) {
+    d3 <- data.frame(list(
+        applications = c(napl,napl),
+        gid = c(1,2),
+        disid = c(i,i)))
+        
+    simulation <- sim(glm.d, data=d3, n=3000)
+
+    d_sim <- ((simulation[,1] / napl) - (simulation[,2]) / napl)
+    N_awards <- mean(simulation[,1] + simulation[,2])
+    d5 <- tibble(d_sim = d_sim)
+    d5$discipline <- levels(d$discipline)[i]
+    d5$N <- N_awards
+    d4 <- full_join(d4, d5, by = c("d_sim", "discipline", "N"))
+}
+
+
+d4 %>% 
+    ggplot(aes(x=d_sim, color=discipline)) +
+    geom_density() +
+    geom_vline(xintercept = 0) +
+    labs(color="Discipline") +
+    xlab("Gender contrast (probability)") +
+    ylab("Density") +
+    annotate(x=-.30, y=5, geom='text', 
+             label='italic("women adv")', parse = TRUE) +
+    annotate(x=.30, y=5, geom='text', 
+             label='italic("men adv")', parse = TRUE)
+```
+
+# Exercice 3
+
+## Question
+
+Considering the total effect (problem 1) and direct effect (problem 2) of gender,
+what causes contribute to the average difference between women and men in award
+rate in this sample? It is not necessary to say whether or not there is evidence of
+discrimination. Simply explain how the direct effects you have estimated make sense
+(or not) of the total effect.
+
+## Answer
+
+The direct effects show that:
+
+1. The Social, Medical and Earth/life sciences, are more likely to award male applicants, whereas Humanities, Interdisciplinary, and Technical and Physical sciences disciplines are more likely to award female applicants. Physics and Chemical sciences appear to be paired with a lower effect of gender.
+
+```{r gender_contrast}
+```
+
+2. The marginal causal effect of gender does not seems to be very strong, as much of the probabilistic mass falls between -11% and 12%. It is noteworthy that the shape of the plot is strongly influenced by the number of applications, as seen in the previous plot in comparison to the following.
+
+```{r mce}
+```
+
+3. The data portraits something slightly different than what is predicted by our direct effect model: the disciplines Physics and Chemical sciences also award more male candidates than female candidates. The contrast between the direct effect model and the data is caused on part because of the lower amount of applications for awards in these disciplines (76 and 122).
+4. The direct effect of gender seems to be affected by the total number of applications: the more applications there are to awards in a particular discipline, the more uncertain the model is on the direct effect of gender.
+5. This points towards a confund `Candidates` (verb), that represents the likelyhood of someone applying for a award. It might depend on the gender of the candidate and their expectation that they might be actually awarded in that discipline (as different disciplines have different avarages of awarded prizes per number of applications, `apa` on the table below and the association between `male.pct`, `apa` and `applications` on the next). As it seems, the more likely on avarage a application is awarded for a given discipline, the more likely avarage number of male candidates will be higher than the number of female candidates.
+
+```{r}
+d2
+```
+
+```{r}
+cor(d2)[c('applications', 'apa', 'male.pct'),c('applications', 'apa', 'male.pct')]
+```
+
+The following DAG might represent this causal system: whether or not someone candidates `C` defines if this person is going to be awarded or not; someone's gender `G` might influence if they candidate or not, as well as ones expertise `e`; the discipline of the fund `D` also might cause a candidate to apply or not, as they evaluate if the application has real chances to be awarded in that particular discipline, in this case, their expertise also playes a role; finally, ones expertise will effect which disciplines they will pursue and if they will be awarded funding or not.
+
+
+```{r echo=FALSE}
+nwo.dag <- dagitty('
+    dag{
+    C [unobserved, pos="1.5,0.2"]
+    A [outcome, pos="2,1"]
+    G [exposure, pos="1,1"]
+    D [outcome, pos="1.5,-1"]
+    e [unobserved, pos="2,-.2"]
+    A <- e -> D
+    e -> C
+    G -> D
+    G -> A
+    D -> A
+    D -> C
+    G -> C
+    C -> A
+    }
+    ')
+drawdag(nwo.dag)
+```
+
+The issue is that the data has been already stratified by `C`, as we do not have the number of researchers that did not applied.
+As a collider, this stratification affects the association between `G` and `D`, in the sense that by stratifying by `C`, `G` loses its causal association with `A`.
+This would be the reason why gender plays such a smaller roll on funding awards,
+making it impossible to extract total causal effect of `G` on `A` from the parameters:
+
+```{r}
+drawdag(dagitty::backDoorGraph(nwo.dag))
+```
+
+# Appendix: Evaluation of training
+
+## Model from exercice 1 (total effect)
+
+```{r}
+traceplot(glm.t)
+trankplot(glm.t)
+```
+
+## Model from exercice 2 (direct effect)
+
+```{r}
+traceplot(glm.d)
+trankplot(glm.d)
+```

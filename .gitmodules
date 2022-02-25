@@ -1,0 +1,6 @@
+[submodule "src/python/resources"]
+	path = src/python/resources
+	url = git@github.com:caiogeraldes/resources.git
+[submodule "stat_rethinking_2022"]
+	path = stat_rethinking_2022
+	url = ./stat_rethinking_2022

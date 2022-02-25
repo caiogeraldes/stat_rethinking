@@ -1,0 +1,677 @@
+---
+title: "Statistical Rethinking -- Week 2"
+author: "Caio Geraldes"
+output:
+  html_notebook: default
+  pdf_document: 
+    latex_engine: xelatex
+    df_print: tibble
+    fig_width: 5
+    fig_height: 4
+    fig_caption: yes
+    highlight: tango
+    keep_tex: yes
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo=TRUE, include=TRUE) 
+```
+
+# Loading data for exercices 1-3
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(rethinking)
+library(tidyverse)
+
+data(Howell1)
+df <- tibble(Howell1)
+head(df)
+```
+
+# Exercice 1
+
+Construct a linear regression of weight as predicted by height, using the adults (age 18 or greater) from the Howell1 dataset. The heights listed below were recorded in the !Kung census, but weights were not recorded for these individuals. Provide predicted weights and 89% compatibility intervals for each of these individuals. That is, fill in the table below, using model-based predictions.
+
+## Answer
+
+### Filtering data
+
+```{r}
+df.18 <- df %>% 
+    filter(age >= 18)
+```
+
+### Choosing a prior
+
+Density of weight seems to allow for a normal (Gaussian) prior:
+
+$w_i \sim \text{Normal}(\mu, \sigma)$
+
+```{r}
+df.18 %>% 
+    ggplot(aes(weight)) +
+    geom_density(bw=0.89)
+```
+
+Given the results of sampling from the prior, a prior such as
+
+$w_i \sim \text{Normal}(\mu,\sigma)\\\mu \sim \text{Normal}(60,10)\\\sigma \sim \text{Uniform}(0,10)$
+
+should do a decent enough job.
+It assumes the mean weight of a person to be 60kg, with 95% of the population avaraging between 40 and 80kg.
+The $\sigma \sim \text{Uniform}(0,10)$ assumes that there is a 10kg standard deviation.
+
+```{r include=TRUE, echo=TRUE}
+sample_mu <- rnorm( 1e4 , 60 , 10 )
+sample_sigma <- runif( 1e4 , 0 , 10 )
+prior_w <- rnorm( 1e4 , sample_mu , sample_sigma )
+```
+
+This prior has a 89% percentage interval of:
+
+```{r}
+pi89  <- PI(prior_w)
+pi89
+```
+
+```{r}
+prior <- with(density(prior_w, bw=0.8),
+              tibble(x, y))
+prior %>%
+    ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(prior,
+                          x > pi89[1] & x < pi89[2]),
+              fill = "red",
+              alpha=0.5) +
+    ylab("Density") +
+    xlab("Weight (prior samples)")
+```
+
+Now, for someone's weight to be predicted by height, should look something like
+
+
+$w_i \sim \text{Normal}(\mu,\sigma)\\\mu_i = \alpha + \beta(x_i - \bar{x})\\\alpha \sim \text{Normal}(60,10)\\\beta \sim \text{Normal}(0,1)\\\sigma \sim \text{Uniform}(0,10)$
+
+Such model accepts a prior distribution for $\beta$ which includes negative values (also in the 0.89\% percent interval), allowing a world in which the increase of height causes a decrease of weight.
+
+
+```{r echo=TRUE}
+N <- 100
+
+a <- rnorm(N, 60, 10)
+b <- rnorm(N, 0, 1)
+
+pi89 <- PI(b)
+bprior <- with(density(b, bw=0.08),
+               tibble(x, y))
+bprior %>% ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(bprior,
+                          x > pi89[1] & x < pi89[2]),
+              fill = "red",
+              alpha=0.5) +
+    ylab("Density") +
+    xlab("β (prior)")
+```
+
+```{r}
+xbar <- mean(df.18$height)
+
+base <- df.18 %>% 
+    ggplot(aes(height, weight))
+
+params <- data.frame(a, b)
+x1 <- rep(130, N)
+x2 <- rep(200, N)
+y1 <- params$a + params$b * (x1 - xbar)
+y2 <- params$a + params$b * (x2 - xbar)
+
+base +
+    geom_curve(aes(x=x1, xend=x2, y=y1, yend=y2),
+               data=data.frame(x1, x2, y1, y2),
+               curvature = 0,
+               alpha=0.3) +
+    geom_abline(slope=0,
+                intercept = 0,
+                 color="red",
+                 alpha=0.5)
+```
+
+Usign a logarithmic normal distribution provides a more reasonable prior for $\beta$.
+I chose to use $\sigma_{\beta} = 0.5$ as the heights are in centimiters, so that an increase of 1 centimeter will not cause an increase of much more than 2 kg, which seems sensible.
+
+```{r}
+N <- 100
+a <- rnorm(N, 60, 10)
+b <- rlnorm(N, 0, 0.5)
+
+pi89 <- PI(b)
+pi89
+```
+
+```{r}
+bprior <- with(density(b, bw=0.018),
+               tibble(x, y))
+bprior %>% 
+    ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(bprior,
+                          x > pi89[1] & x < pi89[2]),
+              fill = "red",
+              alpha=0.5) +
+    ylab("Density") +
+    xlab("β")
+```
+
+```{r}
+xbar <- mean(df.18$height)
+
+base <- df.18 %>%
+    ggplot(aes(height, weight)) 
+
+params <- data.frame(a, b)
+x1 <- rep(130, N)
+x2 <- rep(200, N)
+y1 <- params$a + params$b * (x1 - xbar)
+y2 <- params$a + params$b * (x2 - xbar)
+
+base +
+    geom_curve(aes(x=x1, xend=x2, y=y1, yend=y2),
+               data=data.frame(x1, x2, y1, y2),
+               curvature = 0,
+               alpha=0.3) +
+    geom_abline(slope=0,
+                intercept = 0,
+                 color="red",
+                 alpha=0.5)
+```
+
+### Modeling
+
+So the final model to be fitted with the data is:
+
+$w_i \sim \text{Normal}(\mu,\sigma)\\\mu_i = \alpha + \beta(x_i - \bar{x})\\\alpha \sim \text{Normal}(60,10)\\\beta \sim \text{Log-Normal}(0,0.5)\\\sigma \sim \text{Uniform}(0,10)$
+
+```{r echo=TRUE}
+hbar <- mean(df.18$height)
+
+model.1 <- quap(
+          alist(
+            weight ~ dnorm(mu, sigma),
+            mu <- a + b * (height - hbar),
+            a ~ dnorm(60, 10),
+            b ~ dlnorm(0, 1),
+            sigma ~ dunif(0, 10)
+            ),
+          data=df.18
+          )
+
+model.1
+```
+
+```{r}
+post.samples <- extract.samples(model.1)
+precis(post.samples, hist=FALSE)
+```
+
+```{r}
+vcov(model.1)
+```
+
+```{r}
+diag(vcov(model.1))
+```
+
+```{r}
+cov2cor(vcov(model.1))
+```
+
+#### Model evaluation
+
+```{r}
+hbar <- mean(df.18$height)
+
+xseq <- seq(from=min(df.18$height),
+            to=max(df.18$height),
+             len=352)
+mu <- link(model.1,
+             data=list(height=xseq,hbar=hbar))
+mu.mean <- apply(mu,2,mean)
+mu.min <- apply(mu,2,PI,prob=0.99)["1%",]
+mu.max <- apply(mu,2,PI,prob=0.99)["100%",]
+
+w_sim <- sim(model.1,
+             data=list(height=xseq,hbar=hbar))
+w_sim.min <- apply(w_sim,2,PI)['5%',]
+w_sim.max <- apply(w_sim,2,PI)['94%',]
+
+base +
+    geom_ribbon(aes(x=xseq,
+                 ymax=w_sim.max,
+                 ymin=w_sim.min),
+             fill='grey',
+             alpha=0.6) +
+    geom_ribbon(aes(x=xseq,
+                  ymax=mu.max,
+                  ymin=mu.min),
+              fill='purple',
+              alpha=0.3) +
+    geom_line(aes(x=xseq, y=mu.mean),
+              size=1,
+               color='black') +
+    geom_point(color='purple',
+               alpha=0.5)
+```
+
+### Predicting the values for individuals 1, 2 and 3
+
+#### Individual 1
+
+Any individual 140cm high is predicted to have 35 to 36.5 kg.
+
+```{r}
+mu1 <- mu1 <- link(model.1,data=list(height=140,hbar=hbar))
+pi89 <- PI(mu1)
+pi89
+```
+
+```{r}
+mu1dens <- with(density(mu1, bw=0.02), tibble(x, y))
+mu1dens %>% ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(mu1dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    ylab("Density") +
+    xlab("Predicted Weight for a 140cm high individual")
+```
+
+#### Individual 2
+
+Any individual 160cm high is predicted to have 48 to 49.8 kg.
+
+```{r}
+mu2 <- link(model.1,data=list(height=160,hbar=hbar))
+pi89 <- PI(mu2)
+pi89
+```
+```{r}
+mean(pi89)
+```
+```{r}
+mu2dens <- with(density(mu2, bw=0.02), tibble(x, y))
+mu2dens %>% ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(mu2dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    ylab("Density") +
+    xlab("Predicted Weight for a 160cm high individual")
+```
+
+#### Individual 3
+
+Any individual 175cm high is predicted to have 56.9 to 58.8 kg.
+
+```{r}
+mu3 <- link(model.1,data=list(height=175,hbar=hbar))
+pi89 <- PI(mu3)
+pi89
+```
+
+```{r}
+mu3dens <- with(density(mu3, bw=0.02), tibble(x, y))
+mu3dens %>% ggplot(aes(x, y)) +
+    geom_line() +
+    geom_area(data=subset(mu3dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    ylab("Density") +
+    xlab("Predicted Weight for a 175cm high individual")
+```
+
+# Exercice 2
+
+From the `Howell1` dataset, consider only the people younger than 13 years old. Estimate the causal association between age and weight. Assume that age influences weight through two paths. First, age influences height, and height influences weight. Second, age directly influences weight through age-related changes in muscle growth and body proportions. All of this implies
+this causal model (DAG):
+
+
+```{r echo=FALSE}
+require(ggdag)
+dag  <- dagify(h ~ a,
+               w ~ a + h,
+               exposure = "a",
+               outcome = "w")
+
+dag %>% tidy_dagitty() %>%
+    ggdag() +
+    theme_dag_grey()
+```
+
+Use a linear regression to estimate the total (not just direct) causal effect of
+each year of growth on weight. Be sure to carefully consider the priors. Try
+using prior predictive simulation to assess what they imply.
+
+## Answer
+
+As we are interested on the total causal effect of age on weight, we should not stratify the model by height.
+
+### Filtering the data
+
+```{r}
+df.13 <- df %>% filter(age < 13)
+df.13
+```
+
+There is a linear correlation between age and weight, although due to the method of annotation of age (most of the values seem to have been rounded down with few values with decimal points) there is for each age a lot of variation of weight.
+
+```{r}
+df.13 %>% ggplot(aes(y=weight, x=age)) + geom_point()
+```
+
+### Weigth
+
+Following the data from WHO ([1](https://cdn.who.int/media/docs/default-source/child-growth/growth-reference-5-19-years/weight-for-age-(5-10-years)/cht-wfa-boys-perc-5-10years.pdf?sfvrsn=d45317d3_4) and [2](https://cdn.who.int/media/docs/default-source/child-growth/growth-reference-5-19-years/weight-for-age-(5-10-years)/cht-wfa-girls-perc-5-10years.pdf?sfvrsn=757939d1_4)), a prior distribution of weight with the 97\% interval accounts for the avarage weights of children from 5 to 10 years should fall around 14 and 46 kg.
+
+This might be accomplished by: $\alpha \sim \text{LogNormal}(2.5,.6)$.
+
+```{r}
+PI(rlnorm(1e4, 2.5, .6), 0.97)
+```
+
+The data used also provides a hint that on avarage, from the fifth to the fourteenth year, a child gains 2kg per year, so a prior of $\beta \sim \text{LogNormal}(0.5,0.4)$ will allow for a 89\% percentile interval of:
+
+```{r}
+PI(rlnorm(1e4, 0.5, 0.4))
+```
+
+### Modeling
+
+Our model will be so that:
+
+$weight_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha_i + \beta_i*(age_i - \overline{age})\\\alpha_i \sim \text{LogNormal}(2.5,0.6)\\\beta_i \sim \text{LogNormal}(0.5,0.4)\\\sigma \sim \text{Exponential}(1)$
+
+```{r}
+abar <- mean(df.13$age)
+
+model.2 <- quap(
+    alist(
+       weight ~ dnorm(mu, sigma),
+       mu <- a + b*(age - abar),
+       a ~ dlnorm(2.5,0.6),
+       b ~ dlnorm(0.5,0.4),
+       sigma ~ dexp(1)
+    ),
+    data=df.13
+)
+
+model.2
+```
+
+```{r}
+post.samples <- extract.samples(model.2)
+precis(post.samples, hist=F)
+```
+
+```{r}
+vcov(model.2)
+```
+
+```{r}
+diag(vcov(model.2))
+```
+
+```{r}
+cov2cor(vcov(model.2))
+```
+
+```{r}
+xseq <- seq(from=min(df.13$age), to=max(df.13$age), len=146)
+mu <- link(model.2, data=list(age=xseq,abar=abar))
+mu.mean <- apply(mu,2,mean)
+mu.min <- apply(mu,2,PI,prob=0.99)["1%",]
+mu.max <- apply(mu,2,PI,prob=0.99)["100%",]
+
+w_sim <- sim(model.2, data=list(age=xseq,abar=abar))
+w_sim.min <- apply(w_sim,2,PI)['5%',]
+w_sim.max <- apply(w_sim,2,PI)['94%',]
+
+df.13 %>% ggplot(aes(age,weight)) +
+    geom_ribbon(aes(x=xseq, ymax=w_sim.max, ymin=w_sim.min), fill='grey', alpha=0.4) +
+    geom_ribbon(aes(x=xseq, ymax=mu.max, ymin=mu.min), fill='purple', alpha=0.3) +
+    geom_line(aes(x=xseq, y=mu.mean), size=1, color='black') +
+    geom_point(color='purple', alpha=0.5)
+```
+### Interpretation
+
+The posterior predicts that children will weight on avarage 14.3 to 15kg at age 5 (mean age on the dataset).
+
+```{r}
+post.a <- post.samples$a
+(pi89 <- PI(post.a))
+
+a_dens <- with(density(post.a), tibble(x, y))
+a_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(a_dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    xlab("posterior intercept α (kg)") +
+    ylab('density')
+```
+
+It also predicts that children will weight on avarage 1.2 to 1.5 kg more for each year they grow.
+
+```{r}
+post.b <- post.samples$b
+(pi89 <- PI(post.b))
+
+b_dens <- with(density(post.b), tibble(x, y))
+b_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(b_dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    xlab("posterior slope β (kg/year)") +
+    ylab('density')
+```
+
+
+# Exercice 3
+Now suppose the causal association between age and weight might be different for boys and girls. Use a single linear regression, with a categorical
+variable for sex, to estimate the total causal effect of age on weight separately
+for boys and girls. How do girls and boys differ? Provide one or more posterior summary.
+
+## Answer
+
+The column sex will be mapped so that $\text{female} = 1$ and $\text{male} = 2$.
+
+
+```{r echo=TRUE}
+df.13$sex <- df.13$male+1
+```
+
+### Modeling
+
+Our model will be so that:
+
+$weight_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha_{S_i} + \beta_{S_i}*(age_i - \overline{age})\\\alpha_j \sim \text{LogNormal}(2.5,0.6)\\\beta_j \sim \text{LogNormal}(0.5,0.4)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE}
+abar <- mean(df.13$age)
+
+model.3 <- quap(
+    alist(
+       weight ~ dnorm(mu, sigma),
+       mu <- a[sex] + b[sex]*(age - abar),
+       a[sex] ~ dlnorm(2.5,0.6),
+       b[sex] ~ dlnorm(0.5,0.4),
+       sigma ~ dexp(1)
+    ),
+    data=df.13
+)
+
+model.3
+```
+
+```{r}
+post.samples <- extract.samples(model.3)
+precis(post.samples, 2, hist=FALSE)
+```
+
+On avarage, boys of a given age will be around one kilogram heavier than girls of the same age.
+Boys on avarage gain 100 grams of weight per year more than girls.
+
+```{r}
+rethinking::precis_plot(precis(post.samples, 2, hist=FALSE))
+```
+
+```{r}
+vcov(model.3)
+```
+
+```{r}
+diag(vcov(model.3))
+```
+
+```{r}
+cov2cor(vcov(model.3))
+```
+
+```{r}
+xseq_m <- seq(from=min(df.13$age), to=max(df.13$age), len=71)
+mu_m <- link(model.3, data=list(age=xseq_m,abar=abar,sex=2))
+mu_m.mean <- apply(mu_m,2,mean)
+mu_m.min <- apply(mu_m,2,PI,prob=0.99)["1%",]
+mu_m.max <- apply(mu_m,2,PI,prob=0.99)["100%",]
+
+w_sim_m <- sim(model.3, data=list(age=xseq_m,abar=abar,sex=2))
+w_sim_m.min <- apply(w_sim_m,2,PI)['5%',]
+w_sim_m.max <- apply(w_sim_m,2,PI)['94%',]
+
+df.13 %>% filter(sex==2) %>% ggplot(aes(age,weight)) +
+    geom_ribbon(aes(x=xseq_m, ymax=w_sim_m.max, ymin=w_sim_m.min), fill='grey', alpha=0.4) +
+    geom_ribbon(aes(x=xseq_m, ymax=mu_m.max, ymin=mu_m.min), fill='blue', alpha=0.3) +
+    geom_line(aes(x=xseq_m, y=mu_m.mean), size=1, color='blue') +
+    geom_point(color='blue', alpha=0.5) +
+    labs(title="Boys's (0-13 years) weight (kg) by age prediction distribution and data.",
+         subtitle = "99% percent interval of mean values in blue shade, 89% percent interval in gray shade.")
+```
+
+```{r}
+xseq_f <- seq(from=min(df.13$age), to=max(df.13$age), len=75)
+mu_f <- link(model.3, data=list(age=xseq_f,abar=abar,sex=1))
+mu_f.mean <- apply(mu_f,2,mean)
+mu_f.min <- apply(mu_f,2,PI,prob=0.99)["1%",]
+mu_f.max <- apply(mu_f,2,PI,prob=0.99)["100%",]
+
+w_sim_f <- sim(model.3, data=list(age=xseq_f,abar=abar,sex=1))
+w_sim_f.min <- apply(w_sim_f,2,PI)['5%',]
+w_sim_f.max <- apply(w_sim_f,2,PI)['94%',]
+
+df.13 %>% filter(sex==1) %>% ggplot(aes(age,weight)) +
+    geom_ribbon(aes(x=xseq_f, ymax=w_sim_f.max, ymin=w_sim_f.min), fill='grey', alpha=0.4) +
+    geom_ribbon(aes(x=xseq_f, ymax=mu_f.max, ymin=mu_f.min), fill='red', alpha=0.3) +
+    geom_line(aes(x=xseq_f, y=mu_f.mean), size=1, color='red') +
+    geom_point(color='red', alpha=0.5) +
+    labs(title="Girl's (0-13 years) weight (kg) by age prediction and data.",
+         subtitle = "99% percent interval of mean values in red shade, 89% percent interval in gray shade.")
+```
+
+### Causal contrast
+
+#### $\alpha$: weight at 5 years old
+
+The contrast of $\alpha$ is the contrast of the posterior weight of boys and girls whose age is the median age of the dataset (5 years old).
+The difference at 5 years old is on avarage between 0.7 and 2 kilograms.
+
+```{r}
+a_contrast <- post.samples$a[,2] - post.samples$a[,1]
+(pi89 <- PI(a_contrast))
+
+a_contrast_dens <- with(density(a_contrast), tibble(x, y))
+a_contrast_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(a_contrast_dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    xlab("posterior intercept α contrast (kg)") +
+    ylab('density')
+```
+
+#### $\beta$: kilogram per year
+
+The contrast of $\beta$ is the contrast of the posterior weight gain per year for boys and girld.
+The highest density includes the cases in which boys gain more weight per year (up to 0.270kg ) than girls, but also cases in which the boys and girls' weight gained in a year is pratically the same or slightly more for girls (up to 50 grams).
+
+```{r}
+b_contrast <- post.samples$b[,2] - post.samples$b[,1]
+(pi89 <- PI(b_contrast))
+
+b_contrast_dens <- with(density(b_contrast), tibble(x, y))
+b_contrast_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(b_contrast_dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    xlab("posterior slope β contrast (kg/year)") +
+    ylab('density')
+```
+
+
+#### $\mu$: mean weight by age
+
+The contrast of $\mu$ is the contrast between the mean weight by age and sex. On avarage, Dobe !Kung San boys are at each age heavier by 0.4 up to 2.5 kilograms than girls.
+
+```{r}
+xseq <- seq(from=0, to=13, length.out=100)
+mu_m <- link(model.3, data=list(age=xseq,abar=abar,sex=2))
+mu_f <- link(model.3, data=list(age=xseq,abar=abar,sex=1))
+mu_contrast <- mu_m - mu_f
+
+tibble(mu=c(mu_m, mu_f), sex=factor(c(rep("M",length(mu_m)), rep("F",length(mu_f))))) %>%
+    ggplot(aes(x=mu, color=sex, fill=sex)) + 
+    geom_density(alpha=0.1, bw=0.07) +
+    xlab('posterior weight mean (kg)')
+```
+
+```{r}
+pi89 <- PI(mu_contrast)
+pi89
+
+mu_contrast_dens <- with(density(mu_contrast), tibble(x, y))
+mu_contrast_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(mu_contrast_dens, x > pi89[1] & x < pi89[2]), fill = "red", alpha=0.5) +
+    xlab("posterior mean weight (kg) contrast") +
+    ylab('density')
+```
+
+### Weight contrast
+
+Dobe !Kung San boys and girls in this simulation don't appear to have a reliable difference in weight.
+33% percent of the girls in the simulation had a higher weight for their age when compared to their masculine counterpart.
+
+```{r}
+w_sim_m <- sim(model.3, data=list(age=c(0:13),abar=abar,sex=2), n=1e4)
+w_sim_f <- sim(model.3, data=list(age=c(0:13),abar=abar,sex=1), n=1e4)
+
+tibble(w_sim=c(w_sim_m, w_sim_f), sex=factor(c(rep("M",length(w_sim_m)), rep("F",length(w_sim_f))))) %>%
+    ggplot(aes(x=w_sim, color=sex, fill=sex)) + 
+    xlab("posterior predicted weight (kg)") +
+    geom_density(alpha=0.3)
+
+```
+
+```{r}
+w_sim_contrast <- w_sim_m - w_sim_f
+
+w_sim_contrast_dens <- with(density(w_sim_contrast), tibble(x, y))
+w_sim_contrast_dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(w_sim_contrast_dens, x <= 0),
+              fill = "red",
+               alpha=0.5) +
+    geom_area(data=subset(w_sim_contrast_dens, x >= 0),
+               fill = "blue",
+               alpha=0.5) +
+    xlab("posterior weight (kg) contrast") +
+    ylab('density') +
+    annotate("text", x=-10., y=0.06,
+               label=scales::percent(sum( w_sim_contrast < 0 ) / length(w_sim_contrast),
+                                     accuracy = 0.1),
+               color="red",
+               alpha=0.5) +
+    annotate("text", x=10., y=0.06,
+               label=scales::percent(sum( w_sim_contrast > 0 ) / length(w_sim_contrast),
+                                      accuracy = 0.1),
+               color="blue",
+               alpha=0.5)
+
+```

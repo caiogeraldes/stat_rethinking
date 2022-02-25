@@ -1,0 +1,454 @@
+---
+<<<<<<< HEAD
+title: "Homework - Week 6"
+=======
+title: "Homework - Week 5"
+>>>>>>> 60e08f9433b1a92f0d0e20fd45dc646f7236159a
+author: "Caio Geraldes"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+---
+
+```{r include=FALSE}
+require(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(cmdstanr)
+library(dagitty)
+library(rethinking)
+library(tidyverse)
+
+setMethod( "plot" , "precis" , function(x,y,...) rethinking::precis_plot(x,y,...) )
+setMethod("plot" , "compareIC" , function(x,y,xlim,SE=TRUE,dSE=TRUE,weights=FALSE,...) {
+    dev_in <- x[[1]] - x[[5]]*2 # criterion - penalty*2
+    dev_out <- x[[1]]
+    if ( !is.null(x[['SE']]) ) devSE <- x[['SE']]
+    dev_out_lower <- dev_out - devSE
+    dev_out_upper <- dev_out + devSE
+    if ( weights==TRUE ) {
+        dev_in <- ICweights(dev_in)
+        dev_out <- ICweights(dev_out)
+        dev_out_lower <- ICweights(dev_out_lower)
+        dev_out_upper <- ICweights(dev_out_upper)
+    }
+    n <- length(dev_in)
+    if ( missing(xlim) ) {
+        xlim <- c(min(dev_in),max(dev_out))
+        if ( SE==TRUE & !is.null(x[['SE']]) ) {
+            xlim[1] <- min(dev_in,dev_out_lower)
+            xlim[2] <- max(dev_out_upper)
+        }
+    }
+    main <- colnames(x)[1]
+    set_nice_margins()
+    dotchart( dev_in[n:1] , labels=rownames(x)[n:1] , xlab="deviance" , pch=16 , xlim=xlim , ... )
+    points( dev_out[n:1] , 1:n )
+    mtext(main)
+    # standard errors
+    if ( !is.null(x[['SE']]) & SE==TRUE ) {
+        for ( i in 1:n ) {
+            lines( c(dev_out_lower[i],dev_out_upper[i]) , rep(n+1-i,2) , lwd=0.75 )
+        }
+    }
+    if ( !all(is.na(x@dSE)) & dSE==TRUE ) {
+        # plot differences and stderr of differences
+        dcol <- col.alpha("black",0.5)
+        abline( v=dev_out[1] , lwd=0.5 , col=dcol )
+        diff_dev_lower <- dev_out - x$dSE
+        diff_dev_upper <- dev_out + x$dSE
+        if ( weights==TRUE ) {
+            diff_dev_lower <- ICweights(diff_dev_lower)
+            diff_dev_upper <- ICweights(diff_dev_upper)
+        }
+        for ( i in 2:n ) {
+            points( dev_out[i] , n+2-i-0.5 , cex=0.5 , pch=2 , col=dcol )
+            lines( c(diff_dev_lower[i],diff_dev_upper[i]) , rep(n+2-i-0.5,2) , lwd=0.5 , col=dcol )
+        }
+    }
+})
+```
+
+
+### Loading and preparing data
+
+```{r}
+data("reedfrogs")
+d <- tibble(reedfrogs) %>%
+    mutate(
+        tank = 1:nrow(d),
+        pid = ifelse(pred == "pred", 2, 1), # pred = 2, no = 1
+        sid = ifelse(size == "big", 2, 1), # big = 2, small = 1
+        treatment = str_c(pred, size, sep = ".")
+    )
+
+dat <- tibble(
+    Su = d$surv,
+    D  = d$density,
+    P  = d$pid,
+    S  = d$sid,
+    T  = d$tank
+)
+
+dat
+```
+
+# Exercice 1
+
+## Question
+
+Conduct a prior predictive simulation for the Reedfrog model. By this I mean to simulate the prior distribution of tank survival probabilities $\alpha_j$. Start by using this prior:
+
+$$
+\begin{aligned}
+\alpha_j \sim \text{Normal}(\bar{\alpha}, \sigma)\\
+\bar{\alpha} \sim \text{Normal}(0, 1)\\
+\sigma \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+Be sure to transform the $\alpha_j$ values to the probability scale for plotting and summary. How does increasing the width of the prior on σ change the prior distribution of $\alpha_j$? You might try $\text{Exponential}(10)$ and $\text{Exponential}(0.1)$ for example.
+
+## Answer
+
+The simulation shows that the higher the width the prior $\sigma$ has, i.e. the lower the rate used in the exponential distribution, the wider the prior for $\alpha_j$. For the rates from 0 to 1, the distribution is flat enough to cover the almost the whole range of probabilities, from 0 to 1, whereas a rate of 10 has .89 HPDI on the range of 0.15 and 0.85.
+
+```{r}
+n_samples = 2000
+a_bar <- rnorm(n_samples, 0, 1)
+sigma.1 <- rexp(n_samples, 1)
+sigma.0.1 <- rexp(n_samples, .1)
+sigma.10 <- rexp(n_samples, 10)
+
+aj.0.1 <- inv_logit(rnorm(n_samples, a_bar, sigma.0.1))
+aj.1 <- inv_logit(rnorm(n_samples, a_bar, sigma.1))
+aj.10 <- inv_logit(rnorm(n_samples, a_bar, sigma.10))
+
+aj.0.1.hpdi <- HPDI(aj.0.1)
+aj.1.hpdi <-   HPDI(aj.1)
+aj.10.hpdi <-  HPDI(aj.10)
+
+tibble("σ" = c("Exponential(0.1)", "Exponential(1)", "Exponential(10)"),
+       "|0.89" = c(aj.0.1.hpdi[1], aj.1.hpdi[1], aj.10.hpdi[1]),
+       "0.89|" = c(aj.0.1.hpdi[2], aj.1.hpdi[2], aj.10.hpdi[2]))
+```
+
+```{r echo=FALSE}
+aj.0.1.dens <- with(density(aj.0.1), tibble(x,y))
+aj.0.1.dens$sigma <- "σ - Exponential(0.1)" 
+aj.1.dens <- with(density(aj.1), tibble(x,y))
+aj.1.dens$sigma <- "σ ~ Exponential(1)" 
+aj.10.dens <- with(density(aj.10), tibble(x,y))
+aj.10.dens$sigma <- "σ ~ Exponential(10)" 
+
+aj.1.dens %>%
+    ggplot(aes(x, y, color=sigma, fill=sigma)) +
+    geom_line() +
+    geom_area(data = subset(aj.1.dens, x > aj.1.hpdi[1] & x < aj.1.hpdi[2]), alpha = 0.4) +
+    geom_line(data=aj.0.1.dens) +
+    geom_area(data = subset(aj.0.1.dens, x > aj.0.1.hpdi[1] & x < aj.0.1.hpdi[2]), alpha = 0.4) +
+    geom_line(data=aj.10.dens) +
+    geom_area(data = subset(aj.10.dens, x > aj.10.hpdi[1] & x < aj.10.hpdi[2]), alpha = 0.4) +
+    xlab("α_j prior distribution (probability)") +
+    ylab("Density") +
+    scale_color_discrete("σ") +
+    scale_fill_discrete("σ")
+
+```
+
+#### Saving the model for future comparisons
+
+$$
+\begin{aligned}
+Sur_i \sim \text{Binomial}(D_i, p_i)\\
+\text{logit}(p_i) = \bar{\alpha} + z_{\alpha,T_i}\sigma_\alpha\\
+\bar{\alpha} \sim \text{Normal}(0,1.5)\\
+z_{\alpha,j} \sim \text{Normal}(0,1)\\
+\sigma_\alpha \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+```{r, results='hide'}
+m1 <- ulam(
+    alist(
+        Su ~ dbinom(D, p),
+        logit(p) <- a_bar + zA[T]*sA,
+        zA[T] ~ dnorm(0,1),
+        sA ~ dexp(1),
+        a_bar ~ dnorm(0,1.5),
+        gq> vector[T]:a <<- a_bar + zA*sA
+    ),
+    data = dat,
+    chains = 4,
+    cores = 4,
+    log_lik = TRUE
+)
+```
+
+# Exercice 2
+
+## Question
+
+Revisit the Reedfrog survival data, data(reedfrogs). Start with the varying
+effects model from the book and lecture. Then modify it to estimate the causal effects
+of the treatment variables pred and size, including how size might modify the effect
+of predation. An easy approach is to estimate an effect for each combination of pred
+and size. Justify your model with a DAG of this experiment.
+
+## Answer
+
+#### Modeling
+
+$$
+\begin{aligned}
+Sur_i \sim \text{Binomial}(D_i, p_i)\\
+\text{logit}(p_i) = \bar{\alpha} + z_{\alpha,T_i}\sigma_\alpha + z_{\beta,P_i,S_i}\sigma_\beta\\
+\bar{\alpha} \sim \text{Normal}(0,1.5)\\
+z_{\alpha,j} \sim \text{Normal}(0,1)\\
+z_{\beta,j} \sim \text{Normal}(0,1)\\
+\sigma_\alpha,\sigma_\beta \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+```{r results='hide', warning=FALSE, message=FALSE}
+m2 <- ulam(
+    alist(
+        Su ~ dbinom(D, p),
+        logit(p) <- a_bar + (zA[T]*sA) + (zB[P,S]*sB),
+        zA[T] ~ dnorm(0, 1),
+        matrix[P,S]:zB ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sA ~ dexp(1),
+        sB ~ dexp(1),
+        gq> vector[T]:a <<- a_bar + zA*sA,
+        gq> matrix[P,S]:b <<- zB*sB
+    ),
+    data = dat,
+    chains = 4,
+    cores = 4,
+    log_lik = TRUE
+)
+```
+
+```{r message=FALSE, warning=FALSE}
+precis(m2, pars = c("a_bar", "sA", "sB"))
+plot(precis(m2, pars = c("a_bar", "sA", "sB")))
+```
+
+#### Model investigation
+
+```{r}
+post.samples <- extract.samples(m2)
+```
+
+##### Survival rate across the population of tanks
+
+```{r}
+abar <- inv_logit(post.samples$a_bar)
+abar.hpdi <- HPDI(abar)
+abar.dens <- with(density(abar), tibble(x,y))
+
+abar.dens %>%
+    ggplot(aes(x, y)) +
+    geom_line(color=2) +
+    geom_area(data=subset(abar.dens, x > abar.hpdi[1] & x < abar.hpdi[2]), fill=2, alpha=0.4) +
+    geom_rug(aes(x=propsurv, y=0), data=d, sides="b", color=2, size=2, alpha=0.4) +
+    ylab('Density') +
+    xlab("posterior distribution of the survival rate across the tanks' population")
+```
+
+##### Direct effect of `T`ank
+
+```{r}
+alpha <- inv_logit(post.samples$a)
+
+alpha.df <- tibble(tank = c(1:48))
+
+alpha.df$mean <- apply(alpha,2,mean)
+alpha.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha.df %>%
+    ggplot() +
+    geom_pointrange(aes(x=tank, y =mean, ymin=lhpdi, ymax=hhpdi), color=2) +
+    geom_point(aes(x=tank, y=propsurv), data=d) +
+    geom_hline(yintercept = mean(d$propsurv), ) +
+    geom_vline(xintercept = c(max(d[d$density==10,]$tank) + 0.5,
+                              max(d[d$density==25,]$tank) + 0.5, 
+                              max(d[d$density==35,]$tank) + 0.5)) +
+    ylab("survival probability")
+```
+
+##### Combined direct effect of predation and size
+
+```{r}
+beta <- inv_logit(post.samples$b)
+dimnames(beta)[[2]] <- c('no', 'pred')
+dimnames(beta)[[3]] <- c('small', 'big')
+
+beta.hpdi <- apply(beta, c(2,3), HPDI)
+beta.hpdi %>%
+    as_tibble() %>%
+    tibble::add_column(HPDI = c("|0.89", "0.89|"), .before = 'no.small')
+
+lhpdi <- c(beta.hpdi[1,1,],beta.hpdi[1,2,])
+hhpdi <- c(beta.hpdi[2,1,],beta.hpdi[2,2,])
+names(lhpdi) <- c("no.small", "no.big", "pred.small", "pred.big")
+names(hhpdi) <- c("no.small", "no.big", "pred.small", "pred.big")
+
+beta.df <- as_tibble(beta) %>% pivot_longer(everything()) %>%
+    group_by(name) %>% 
+    group_modify(~ with(density(.x$value), tibble(x,y))) %>%
+    mutate(lhpdi = flatten_dbl(map(name, ~ lhpdi[.x])),
+           hhpdi = flatten_dbl(map(name, ~ hhpdi[.x])))
+
+beta.df %>% ggplot(aes(x=x, y=y, color=name, fill=name)) +
+    geom_line() +
+    geom_area(data=subset(beta.df, x > lhpdi & x < hhpdi), alpha = 0.2) +
+    geom_rug(aes(x=propsurv, y=0, color=treatment), data=d, sides="b", size=2, alpha=0.4) +
+    scale_color_discrete("PRED.SIZE") +
+    scale_fill_discrete("PRED.SIZE") +
+    ylab('Density') +
+    xlab("posterior distribution β_j (probability)")
+```
+
+```{r}
+p <- (link(m2))
+
+p.df <- tibble(tank = c(1:48))
+
+p.df$mean <- apply(p,2,mean)
+p.df$lhpdi <- apply(p,2,HPDI)[1,]
+p.df$hhpdi <- apply(p,2,HPDI)[2,]
+p.df$pred <- d$pred
+
+p.df %>%
+    ggplot() +
+    geom_pointrange(aes(x=tank, y=mean, ymin=lhpdi, ymax=hhpdi, color=pred)) +
+    geom_point(aes(x=tank, y=propsurv, size=density), data=d) +
+    geom_hline(yintercept = mean(d$propsurv)) +
+    geom_vline(xintercept = c(max(d[d$density==10,]$tank) + 0.5,
+                              max(d[d$density==25,]$tank) + 0.5, 
+                              max(d[d$density==35,]$tank) + 0.5)) +
+    scale_size("Density", breaks = c(10,25,35), range = c(.5,2)) +
+    scale_color_discrete("Predation") +
+    ylab("survival probability")
+```
+
+#### DAG
+
+As the data comes from an experiment, it is reasonable to assume that there is no causal relationship between the controlled variables.
+`T`, `S` and `P` are competing causes, so they might be used in the same model to increase precision.
+
+```{r echo=FALSE}
+reedfrogs.dag <- dagitty('dag {
+D [adjusted,pos="1,0"]
+P [exposure,pos="-0.5,0.5"]
+S [exposure,pos="0.5,0.5"]
+Su [outcome,pos="0,0"]
+T [adjusted,pos="-1,0"]
+D -> Su
+P -> Su
+S -> Su
+T -> Su}')
+drawdag(reedfrogs.dag)
+```
+
+# Exercice 3
+
+## Question
+
+Now estimate the causal effect of density on survival. Consider whether pred modifies the effect of density. There are several good ways to include density in your Binomial GLM. You could treat it as a continuous regression variable (possibly standardized). Or you could convert it to an ordered category (with three levels). Compare the σ (tank standard deviation) posterior distribution to σ from your model in Problem 2. How are they different? Why?
+
+## Answer
+
+### Adapting the data
+
+```{r}
+dat$did <- ifelse(d$density == 10, 1, ifelse(d$density == 25, 2, 3))
+dat$stdD <- standardize(dat$D)
+```
+
+### Modeling
+
+$$
+\begin{aligned}
+Sur_i \sim \text{Binomial}(D_i, p_i)\\
+\text{logit}(p_i) = \bar{\alpha} + z_{\alpha,T_i}\sigma_\alpha + z_{\beta,P_i,S_i}\sigma_\beta + z_{\gamma,P_i}\sigma_\gamma * z_{D_i}\\
+\bar{\alpha} \sim \text{Normal}(0,1.5)\\
+z_{\alpha,j}, z_{\beta,j}, z_{\gamma,j} \sim \text{Normal}(0,1)\\
+\sigma_\alpha,\sigma_\beta \sim \text{Exponential}(1)\\
+\sigma_\gamma \sim \text{Exponential}(5)
+\end{aligned}
+$$
+
+```{r results='hide', warning=FALSE, message=FALSE}
+m3 <- ulam(
+    alist(
+        Su ~ dbinom(D, p),
+        logit(p) <- a_bar + (zA[T]*sA) + (zB[P,S]*sB) + ((zG[P]*sG)*stdD),
+        zA[T] ~ dnorm(0, 1),
+        matrix[P,S]:zB ~ dnorm(0, 1),
+        zG[P] ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sA ~ dexp(1),
+        sB ~ dexp(1),
+        sG ~ dexp(5),
+        gq> vector[T]:a <<- a_bar + zA*sA,
+        gq> matrix[P,S]:b <<- zB*sB,
+        gq> vector[P]:g <<- zG*sG
+    ),
+    data = dat,
+    chains = 4,
+    cores = 4,
+    log_lik = TRUE
+)
+```
+
+```{r message=FALSE, warning=FALSE}
+precis(m3, pars = c("a_bar", "sA", "sB", "sG", "g", "b"), depth = 3)
+plot(precis(m3, pars = c("a_bar", "sA", "sB", "sG", "g", "b"), depth = 3))
+```
+
+### Comparing σ_α
+
+The model presented in the class (`m1`) had $\sigma_\alpha$ ranging from 1.35 and 2.00, with mean of 1.64.
+Adding a coefficient for `P`redation and `S`ize to the model, resulting in the model `m2`, lowered this value to the range of 0.14 to 0.54, with mean of 0.75.
+Finally, by adding a coefficient for `P`redation and `Density`, the value lowered slightly to the range of 0.14 to 0.48, with mean of 0.69.
+
+The difference between $\sigma_\alpha^1$, $\sigma_\alpha^2$, and $\sigma_\alpha^3$ is due to the fact that the variables added to the model are causes for the variation of the survival rate.
+Predation alone has a strong effect, dissolving a good deal of the variation spread across the tanks. Size, on other hand, lowers the variation in the cases where Predation is also seen, lowering the survival rates if predators find big tadpoles.
+This is the reason for the drop from $\sigma_\alpha^1$ to $\sigma_\alpha^2$. 
+Also, as density is a cause for survival (tough small), particularly in presence of predators, its addition in the model causes part of the variation previously spread by the tanks variable to dissolve.
+
+```{r}
+s1 <- (extract.samples(m1)$sA)
+s2 <- (extract.samples(m2)$sA)
+s3 <- (extract.samples(m3)$sA)
+
+sigmas <- tibble(model1=s1, model2=s2, model3=s3)
+precis(sigmas)
+
+sigmas %>%
+    pivot_longer(everything()) %>%
+    ggplot(aes(x=value, color=name)) +
+    geom_density(size=3) +
+    scale_color_viridis_d("Model")
+```
+
+The same applies for the change from $\sigma_\beta^2$ to $\sigma_\beta^3$, as part of the variation of predation is dissolved into density.
+
+```{r}
+s1 <- (extract.samples(m1)$sB)
+s2 <- (extract.samples(m2)$sB)
+
+sigmas <- tibble(model2=s2, model3=s3)
+precis(sigmas)
+
+sigmas %>%
+    pivot_longer(everything()) %>%
+    ggplot(aes(x=value, color=name)) +
+    geom_density(size=3) +
+    scale_color_viridis_d("Model")
+```

@@ -1,0 +1,156 @@
+---
+title: "Testing predicted temperature for exercice 3 - Week 4"
+author: "Caio Geraldes"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_float: yes
+---
+
+```{r echo=FALSE, include=FALSE}
+library(tidyverse)
+library(rethinking)
+library(dagitty)
+```
+
+# Loading data
+
+```{r}
+data("cherry_blossoms")
+d.cherry <- (cherry_blossoms)
+d.cherry <- d.cherry[complete.cases(d.cherry$temp,d.cherry$doy),]
+```
+
+# Modeling
+
+## DAG, causal model
+
+```{r echo=FALSE}
+cherry.dag <- dagitty('dag {
+D [outcome,pos="-0.750,-0.500"]
+T [exposure,pos="-1.000,-0.500"]
+T_l [adjusted,pos="-1.000,-0.250"]
+T_u [adjusted,pos="-1.000,-0.750"]
+Y [pos="-1.250,-0.500"]
+T -> D
+T <-> T_l
+T <-> T_u
+T_l -> D
+T_u -> D
+Y -> T
+Y -> T_l
+Y -> T_u
+}')
+drawdag(cherry.dag)
+```
+
+## Temperature Model A: polynomial regression (on date)
+
+Model: $temp \sim \alpha + \sum_{k=1}^{5}{w_k*year^k}$
+
+Prior:
+
+$temp_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \sum_{k=1}^{5}{w_k*year^k}\\\alpha \sim \text{Normal}(100,10)\\w_k \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r}
+m.temp <- quap(
+    alist(
+        temp ~ dnorm( mu , sigma ) ,
+        mu <- a + w1*year + w2*year^2 + w3*year^3 + w4*year^4 + w5*year^5,
+        a ~ dnorm(1,1),
+        w1 ~ dnorm(0,10),
+        w2 ~ dnorm(0,10),
+        w3 ~ dnorm(0,10),
+        w4 ~ dnorm(0,10),
+        w5 ~ dnorm(0,10),
+        sigma ~ dexp(1)
+    ), data=list( temp=d.cherry$temp , year=standardize(d.cherry$year) ) 
+    )
+```
+
+```{r}
+precis(m.temp, depth=2)
+precis_plot(precis(m.temp, depth=2))
+```
+
+```{r}
+mu <- link(m.temp)
+mu.mean <- apply(mu,2,mean)
+mu.min <- apply(mu,2,PI,prob=0.99)["1%",]
+mu.max <- apply(mu,2,PI,prob=0.99)["100%",]
+
+w_sim <- sim(m.temp)
+w_sim.min <- apply(w_sim,2,PI)['5%',]
+w_sim.max <- apply(w_sim,2,PI)['94%',]
+
+d.cherry %>% ggplot(aes(x=year, y=temp)) +
+    geom_ribbon(aes(ymax=w_sim.max, ymin=w_sim.min), fill='grey', alpha=0.4) +
+    geom_ribbon(aes(ymax=mu.max, ymin=mu.min), fill='blue', alpha=.3) +
+    geom_point(alpha=.6)
+```
+
+## DOY Model SLR A: simple linear regression, unstratified
+
+Model: $doy \sim \alpha + \beta_t * temperature$
+
+Prior:
+
+$doy_i \sim \text{Normal}(\mu_i, \sigma)\\\mu_i = \alpha + \beta_t * temperature_i\\\alpha \sim \text{Normal}(100,10)\\\beta_t \sim \text{Normal}(0, 10)\\\sigma \sim \text{Exponential}(1)$
+
+```{r echo=TRUE, results='hide'}
+m.slr.a <- ulam(
+    alist(
+        doy ~ dnorm(mu, sigma),
+        mu <- alpha + beta_t * temp,
+        alpha ~ dnorm(100,10),
+        beta_t ~ dnorm(0,10),
+        sigma ~ dexp(1)
+        ),
+    data=d.cherry, chains=4, cores=4, log_lik=TRUE)
+```
+
+```{r}
+precis(m.slr.a)
+precis_plot(precis(m.slr.a))
+```
+
+
+# Predictions
+
+```{r}
+z <- (2050 - mean(d.cherry$year)) / sd(d.cherry$year)
+temp_sim <- sim(m.temp, data = list(year=z))
+
+temp_sim.dens <- with(density(temp_sim), tibble(x, y))
+
+doy_sim_2050 <- flatten_dbl(as.list(sim(m.slr.a, data = list(temp=temp_sim))))
+doy.slr.2050.dens <- with(density(doy_sim_2050), tibble(x, y))
+doy.slr.2050.dens$model <- "Pred. temp. for 2050"
+
+doy_sim_9 <- flatten_dbl(as.list(sim(m.slr.a, data = list(temp=9))))
+doy.slr.9.dens <- with(density(doy_sim_9), tibble(x, y))
+doy.slr.9.dens$model <- "Temp = 9 degrees"
+```
+
+
+
+```{r}
+(hpdi.2050 <- HPDI(doy_sim_2050))
+(hpdi.9 <- HPDI(doy_sim_9))
+
+doy.data.dens <- with(density(d.cherry$doy), tibble(x, y))
+doy.data.dens$model <- "Data"
+(hpdi.data <- HPDI(d.cherry$doy))
+
+doy.slr.2050.dens %>% ggplot(aes(x,y)) +
+    geom_line() +
+    geom_area(data=subset(doy.slr.2050.dens, x > hpdi.2050[1] & x < hpdi.2050[2]), aes(fill=model), alpha=0.5) +
+    geom_line(aes(x,y), data=doy.data.dens) +
+    geom_area(data=subset(doy.data.dens, x > hpdi.data[1] & x < hpdi.data[2]), aes(fill = model), alpha=0.5) +
+    geom_line(aes(x,y), data=doy.slr.9.dens) +
+    geom_area(data=subset(doy.slr.9.dens, x > hpdi.9[1] & x < hpdi.9[2]), aes(fill = model), alpha=0.5) +
+    xlab('Date of blossom') +
+    ylab('density') +
+    labs(title='Contrast between current date of blossom with simulations') +
+    scale_fill_brewer("",palette = 'Dark2')
+```
