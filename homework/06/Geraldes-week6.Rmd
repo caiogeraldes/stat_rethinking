@@ -1,9 +1,5 @@
 ---
-<<<<<<< HEAD
 title: "Homework - Week 6"
-=======
-title: "Homework - Week 5"
->>>>>>> 60e08f9433b1a92f0d0e20fd45dc646f7236159a
 author: "Caio Geraldes"
 output: 
   html_notebook: 
