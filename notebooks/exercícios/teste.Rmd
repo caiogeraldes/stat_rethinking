@@ -1,0 +1,492 @@
+---
+title: "Exercices - Chapter 13"
+author: "Caio Geraldes"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  pdf_notebook:
+    toc: yes
+---
+
+```{r include=FALSE}
+require(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(cmdstanr)
+library(dagitty)
+library(rethinking)
+library(tidyverse)
+
+setMethod( "plot" , "precis" , function(x,y,...) rethinking::precis_plot(x,y,...) )
+setMethod("plot" , "compareIC" , function(x,y,xlim,SE=TRUE,dSE=TRUE,weights=FALSE,...) {
+    dev_in <- x[[1]] - x[[5]]*2 # criterion - penalty*2
+    dev_out <- x[[1]]
+    if ( !is.null(x[['SE']]) ) devSE <- x[['SE']]
+    dev_out_lower <- dev_out - devSE
+    dev_out_upper <- dev_out + devSE
+    if ( weights==TRUE ) {
+        dev_in <- ICweights(dev_in)
+        dev_out <- ICweights(dev_out)
+        dev_out_lower <- ICweights(dev_out_lower)
+        dev_out_upper <- ICweights(dev_out_upper)
+    }
+    n <- length(dev_in)
+    if ( missing(xlim) ) {
+        xlim <- c(min(dev_in),max(dev_out))
+        if ( SE==TRUE & !is.null(x[['SE']]) ) {
+            xlim[1] <- min(dev_in,dev_out_lower)
+            xlim[2] <- max(dev_out_upper)
+        }
+    }
+    main <- colnames(x)[1]
+    set_nice_margins()
+    dotchart( dev_in[n:1] , labels=rownames(x)[n:1] , xlab="deviance" , pch=16 , xlim=xlim , ... )
+    points( dev_out[n:1] , 1:n )
+    mtext(main)
+    # standard errors
+    if ( !is.null(x[['SE']]) & SE==TRUE ) {
+        for ( i in 1:n ) {
+            lines( c(dev_out_lower[i],dev_out_upper[i]) , rep(n+1-i,2) , lwd=0.75 )
+        }
+    }
+    if ( !all(is.na(x@dSE)) & dSE==TRUE ) {
+        # plot differences and stderr of differences
+        dcol <- col.alpha("black",0.5)
+        abline( v=dev_out[1] , lwd=0.5 , col=dcol )
+        diff_dev_lower <- dev_out - x$dSE
+        diff_dev_upper <- dev_out + x$dSE
+        if ( weights==TRUE ) {
+            diff_dev_lower <- ICweights(diff_dev_lower)
+            diff_dev_upper <- ICweights(diff_dev_upper)
+        }
+        for ( i in 2:n ) {
+            points( dev_out[i] , n+2-i-0.5 , cex=0.5 , pch=2 , col=dcol )
+            lines( c(diff_dev_lower[i],diff_dev_upper[i]) , rep(n+2-i-0.5,2) , lwd=0.5 , col=dcol )
+        }
+    }
+})
+```
+
+
+# Easy
+
+1. Which of the following priors will produce more shrinkage in the estimates? (a) $\alpha_{\text{TANK}} \sim \text{Normal}(0,1)$; (b) $\alpha_{\text{TANK}} \sim \text{Normal}(0,2)$?
+
+- Mathematical reasoning
+
+The model (a) is more skeptical of values far away from the mean, so it will shrink the values more than the model (b).
+
+```{r fig.width=4, fig.height=2, echo=FALSE}
+ggplot(tibble(x=c(-5:5)), aes(x=x)) +
+    geom_function(fun = dnorm, args = list(mean=0, sd = 1), aes(color="Normal(0,1)")) +
+    geom_function(fun = dnorm, args = list(mean=0, sd = 2), aes(color="Normal(0,2)")) +
+    ylab("Density")
+```
+
+- Using a generative model:
+
+```{r}
+N <- 100
+a <- c(0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9)
+abar <- mean(a)
+t <- c(1:8)
+l <- sapply(1:8, function(i) sum(rbinom(1, N, prob=a[i])))
+
+dat <- list(N = N, t = t, l = l)
+
+m1 <- quap(alist(l ~ dbinom(N, p), logit(p) <- a[t], a[t] ~ dnorm(0,1)), data = dat)
+m2 <- quap(alist(l ~ dbinom(N, p), logit(p) <- a[t], a[t] ~ dnorm(0,2)), data = dat)
+```
+
+
+```{r fig.width=5, fig.height=4, echo=FALSE}
+post.m1 <- extract.samples(m1)
+m1.means <- apply(inv_logit(post.m1$a), 2, mean)
+post.m2 <- extract.samples(m2)
+m2.means <- apply(inv_logit(post.m2$a), 2, mean)
+
+tibble(t = t, a = a, m1 = m1.means, m2 = m2.means) %>%
+    ggplot(aes(x=as.numeric(t))) +
+    geom_point(aes(y=a, color="Data")) +
+    geom_point(aes(y=m1.means, color="Normal(0,1)")) +
+    geom_point(aes(y=m2.means, color="Normal(0,2)")) +
+    geom_hline(yintercept=abar)
+```
+
+2. Rewrite the following model as a multilevel model.
+
+$$
+\begin{aligned}
+y_i \sim \text{Binomial}(1, p_i)\\
+\text{logit}(p_i) = \alpha_{\text{GROUP}_i} + \beta x_i\\
+\alpha_{\text{GROUP}} \sim \text{Normal}(0, 1.5)\\
+\beta \sim \text{Normal}(0, 0.5)
+\end{aligned}
+$$
+
+- MLM
+
+$$
+\begin{aligned}
+y_i \sim \text{Binomial}(1, p_i)\\
+\text{logit}(p_i) = \alpha_{\text{GROUP}_i} + \beta x_i\\
+\alpha_{\text{GROUP}} \sim \text{Normal}(\bar{\alpha}, \sigma)\\
+\beta \sim \text{Normal}(0, 0.5)\\
+\bar{\alpha} \sim \text{Normal}(0,1.5)\\
+\sigma \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+3.Rewrite the following model as a multilevel model.
+
+$$
+\begin{aligned}
+y_i \sim \text{Normal}(\mu_i, \sigma)\\
+\mu_i = \alpha_{\text{GROUP}_i} + \beta x_i\\
+\alpha_{\text{GROUP}} \sim \text{Normal}(0, 5)\\
+\beta \sim \text{Normal}(0, 1)\\
+\sigma \sim \text{Exponential}(1)
+\end{aligned}
+$$
+- MLM:
+
+$$
+\begin{aligned}
+y_i \sim \text{Normal}(\mu_i, \sigma)\\
+\mu_i = \alpha_{\text{GROUP}_i} + \beta x_i\\
+\alpha_{\text{GROUP}} \sim \text{Normal}(\bar{\alpha}, \sigma_\alpha)\\
+\beta \sim \text{Normal}(0, 1)\\
+\bar{\alpha} \sim \text{Normal}(0,5)\\
+\sigma, \sigma_\alpha \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+4. Write a mathematical model formula for a Poisson regression with varying intercepts.
+
+$$
+\begin{aligned}
+A_i \sim \text{Poisson}(\lambda_i)\\
+\log(\lambda_i) = \alpha_{B_i} + \beta x\\
+\alpha_j \sim \text{Normal}(\bar{\alpha}, \sigma_\alpha)\\
+\beta \sim \text{Normal}(0,1)\\
+\bar{\alpha} \sim \text{Normal}(0,1)\\
+\sigma_\alpha \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+5.  Write a mathematical model formula for a Poisson regression with two different kinds of varying intercepts, a cross-classified model.
+
+$$
+\begin{aligned}
+A_i \sim \text{Poisson}(\lambda_i)\\
+\log(\lambda_i) = \alpha_{B_i} + \gamma_{C_i} + \beta x\\
+\alpha_j \sim \text{Normal}(\bar{\alpha}, \sigma_\alpha)\\
+\gamma_k \sim \text{Normal}(0, \sigma_\gamma)\\
+\beta \sim \text{Normal}(0,1)\\
+\bar{\alpha} \sim \text{Normal}(0,1)\\
+\sigma_\alpha, \sigma_\gamma \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+# Medium
+
+1. Revisit the Reed frog survival data, data(reedfrogs), and add the predation and size
+treatment variables to the varying intercepts model. Consider models with either main effect alone,
+both main effects, as well as a model including both and their interaction. Instead of focusing on
+inferences about these two predictor variables, focus on the inferred variation across tanks. Explain
+why it changes as it does across models.
+
+```{r}
+data("reedfrogs")
+reed.df <- tibble(reedfrogs)
+reed.df$tank <- 1:48
+head(reed.df)
+
+dat <- list(
+    D = reed.df$density,
+    size = ifelse(reed.df$size=="small", 1L, 2L),
+    pred = ifelse(reed.df$pred == "no", 0L, 1L),
+    tank = 1:nrow(reed.df),
+    S = reed.df$surv
+)
+head(as_tibble(dat))
+```
+
+```{r}
+# tank
+reed.mB <- ulam(
+    alist(
+        S ~ dbinom(D, p),
+        logit(p) <- abar + zA[tank]*sA,
+        vector[48]:zA ~ normal(0,1),
+        abar ~ normal(0,1.5),
+        sA ~ exponential(1),
+
+        gq> vector[48]:a <<- abar + zA*sA
+    ),
+    data = dat, chains = 4, cores = 4,
+    log_lik = TRUE,
+    file = "models/reed.mB"
+)
+
+# tank, pred
+reed.mP <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- abar + zA[tank]*sA + b*pred,
+
+        vector[48]:zA ~ normal(0,1),
+        b ~ normal(-0.5,1),
+        abar ~ normal(0,1.5),
+        sA ~ exponential(1),
+
+        gq> vector[48]:a <<- abar + zA*sA
+    ),
+    data = dat, chains = 4, cores = 4,
+    log_lik = TRUE,
+    file = "models/reed.mP"
+)
+
+# tank, size
+reed.mS <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- abar + zA[tank]*sA + g[size],
+
+        vector[48]:zA ~ normal(0,1),
+        vector[2]:g ~ normal(0, 0.5),
+        abar ~ normal(0,1.5),
+        sA ~ exponential(1),
+
+        gq> vector[48]:a <<- abar + zA*sA
+    ),
+    data = dat, chains = 4, cores = 4,
+    log_lik = TRUE,
+    file = "models/reed.mS"
+)
+
+# tank, size, pred
+reed.mSP <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- abar + zA[tank]*sA + g[size] + b*pred,
+
+        vector[48]:zA ~ normal(0,1),
+        b ~ normal(-0.5,1),
+        vector[2]:g ~ normal(0, 0.5),
+        abar ~ normal(0,1.5),
+        sA ~ exponential(1),
+
+        gq> vector[48]:a <<- abar + zA*sA
+    ),
+    data = dat, chains = 4, cores = 4,
+    log_lik = TRUE,
+    file = "models/reed.mSP"
+)
+
+# tank, size, pred, iteraction
+reed.mSPi <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- abar + zA[tank]*sA + g[size] + b[size]*pred,
+
+        vector[48]:zA ~ normal(0,1),
+        vector[2]:b ~ normal(-0.5,1),
+        vector[2]:g ~ normal(0, 0.5),
+        abar ~ normal(0,1.5),
+        sA ~ exponential(1),
+
+        gq> vector[48]:a <<- abar + zA*sA
+    ),
+    data = dat, chains = 4, cores = 4,
+    log_lik = TRUE,
+    file = "models/reed.mSPi"
+)
+```
+
+```{r}
+coeftab_plot(coeftab(reed.mB, reed.mP, reed.mS, reed.mSP, reed.mSPi), pars="sA")
+```
+
+2. Compare the models you fit just above, using WAIC. Can you reconcile the differences in WAIC with the posterior distributions of the models?
+
+
+```{r}
+compare(reed.mB, reed.mP, reed.mS, reed.mSP, reed.mSPi)
+plot(compare(reed.mB, reed.mP, reed.mS, reed.mSP, reed.mSPi))
+```
+
+```{r fig.height=5}
+coeftab_plot(coeftab(reed.mB, reed.mP, reed.mS, reed.mSP, reed.mSPi),
+    pars=c("b", "b[1]", "b[2]", "g[1]", "g[2]"))
+```
+
+
+3. Re-estimatethe basic Reed frog varying intercept model, butnow using a Cauchy distribution
+in place of the Gaussian distribution for the varying intercepts. That is, fit this model:
+$$
+\begin{aligned}
+S_i \sim \text{Binomial}(D_i, p_i)\\
+\text{logit}(pi) = \alpha_{\text{tank}_i}\\
+\alpha_\text{tank} \sim \text{Cauchy}(\alpha, \sigma)\\
+\bar{\alpha} \sim \text{Normal}(0, 1)\\
+\sigma \sim \text{Exponential}(1)
+\end{aligned}
+$$
+
+(You are likely to see many divergent transitions for this model. Can you figure out why? Can you
+fix them?) Compare the posterior means of the intercepts, $\alpha_\text{tank}$, to the posterior means produced
+in the chapter, using the customary Gaussian prior. Can you explain the pattern of differences? Take
+
+```{r results='hide'}
+reed.mBa <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- a[tank],
+        vector[48]:a ~ dcauchy(abar, sigma),
+        abar ~ normal(0,1),
+        sigma ~ exponential(1)
+    ),
+    data = dat, chains=4, cores=4,
+    log_lik = TRUE,
+    file = "models/reed.mBa"
+)
+```
+
+```{r, fig.width=3, fig.height=4, echo=FALSE}
+ps.reed.mB <- extract.samples(reed.mB)
+a.mB <- apply(ps.reed.mB$a, 2, mean)
+ps.reed.mBa <- extract.samples(reed.mBa)
+a.mBa <- apply(ps.reed.mBa$a, 2, mean)
+
+tibble(x=a.mB, y=a.mBa) %>%
+    ggplot(aes(x=x, y=y)) +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    geom_point(color=2, size=2.5, alpha=0.7) +
+    xlab("intercept (Gaussian prior, log-odds)") +
+    ylab("intercept (Cauchy prior, log-odds)")
+```
+
+The Cauchy distribution allow the probabilities to explode in the log-odds scale, i.e. does not cause enough shrinkage in the posterior distribution.
+
+```{r echo=FALSE}
+alpha <- (ps.reed.mB$a)
+
+alpha.1.df <- tibble(tank = c(1:48))
+
+alpha.1.df$mean <- apply(alpha,2,mean)
+alpha.1.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.1.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha <- (ps.reed.mBa$a)
+
+alpha.2.df <- tibble(tank = c(1:48))
+
+alpha.2.df$mean <- apply(alpha,2,mean)
+alpha.2.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.2.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha.2.df %>%
+    ggplot() +
+    geom_point(aes(x=tank, y =mean, color="Gaussian" , shape="Gaussian" ), data=alpha.1.df, size=4, alpha=0.8) +
+    geom_point(aes(x=tank, y =mean, color="Cauchy"   , shape="Cauchy"   ), size=4, alpha=0.8) +
+    ylab("survival proportion (log-odds)") +
+    scale_color_discrete("Prior distribution") +
+    scale_shape("Prior distribution")
+```
+
+4. Now use a Student-t distribution with $\nu = 2$ for the intercepts:
+
+$$
+\alpha_\text{tank} \sim \text{Student}(2, \alpha, \sigma)
+$$
+
+Refer back to the Student-t example in Chapter 7 (page 234), if necessary. Compare the resulting
+posterior to both the original model and the Cauchy model in 13M3. Can you explain the differences
+and similarities in shrinkage in terms of the properties of these distributions?
+
+```{r results='hide'}
+reed.mBb <- ulam(
+    alist(
+        S ~ binomial(D, p),
+        logit(p) <- a[tank],
+        vector[48]:a ~ dstudent(2, abar, sigma),
+        abar ~ normal(0,1),
+        sigma ~ exponential(1)
+    ),
+    data = dat, chains=4, cores=4,
+    log_lik = TRUE,
+    file = "models/reed.mBb"
+)
+```
+
+```{r, fig.width=3, fig.height=4, echo=FALSE}
+ps.reed.mBb <- extract.samples(reed.mBb)
+a.mBb <- apply(ps.reed.mBb$a, 2, mean)
+
+tibble(x=a.mB, y=a.mBb) %>%
+    ggplot(aes(x=x, y=y)) +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    geom_point(color=2, size=2.5, alpha=0.7) +
+    xlab("intercept (Gaussian prior, log-odds)") +
+    ylab("intercept (Student-t prior, log-odds)")
+
+tibble(x=a.mBa, y=a.mBb) %>%
+    ggplot(aes(x=x, y=y)) +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    geom_point(color=2, size=2.5, alpha=0.7) +
+    xlab("intercept (Cauchy prior, log-odds)") +
+    ylab("intercept (Student-t prior, log-odds)")
+```
+
+As the Student-t distribution is has thicker tails than the Gaussian, and thiner than the Cauchy, it falls in between both models in the most extreme tanks.
+
+```{r echo=FALSE}
+alpha <- (ps.reed.mB$a)
+
+alpha.1.df <- tibble(tank = c(1:48))
+
+alpha.1.df$mean <- apply(alpha,2,mean)
+alpha.1.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.1.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha <- (ps.reed.mBa$a)
+
+alpha.2.df <- tibble(tank = c(1:48))
+
+alpha.2.df$mean <- apply(alpha,2,mean)
+alpha.2.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.2.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha <- (ps.reed.mBb$a)
+
+alpha.3.df <- tibble(tank = c(1:48))
+
+alpha.3.df$mean <- apply(alpha,2,mean)
+alpha.3.df$lhpdi <- apply(alpha,2,HPDI)[1,]
+alpha.3.df$hhpdi <- apply(alpha,2,HPDI)[2,]
+
+alpha.2.df %>%
+    ggplot() +
+    geom_point(aes(x=tank, y =mean, color="Gaussian" , shape="Gaussian" ), data=alpha.1.df, size=4, alpha=0.8) +
+    geom_point(aes(x=tank, y =mean, color="Cauchy"   , shape="Cauchy"   ), size=4, alpha=0.8) +
+    geom_point(aes(x=tank, y =mean, color="Student-t", shape="Student-t"), data=alpha.3.df, size=4, alpha=0.8) +
+    ylab("survival proportion (log-odds)") +
+    scale_color_discrete("Prior distribution") +
+    scale_shape("Prior distribution")
+```
+
+
+```{r echo=FALSE}
+ggplot(data=tibble(x=seq(from=-5,to=5, length.out=1e4)), aes(x=x)) +
+    geom_function(fun=dcauchy, aes(color="Cauchy"), size=1) +
+    geom_function(fun=dnorm, aes(color="Normal"), size=1) +
+    geom_function(fun=dstudent, aes(color="Student t"), size=1) +
+    ylab("Density") +
+    labs(title="Normal, Student-t and Cauchy distributions") +
+    scale_color_discrete("Distribution")
+```
+
+
+# Hard
